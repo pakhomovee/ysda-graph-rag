@@ -148,6 +148,16 @@ tokens appear only in output, never the prompt, so the guidance FSM never
 activates offline and the schema is silently ignored. `gen_subq.py` asks for one
 question per line and parses the harmony `final` channel defensively instead.
 
+**Cached weights still hit the network.** vLLM re-resolves config and tokenizer
+files through the Hub even when every byte is on disk, so on a box with slow or
+filtered egress the engine stalls in an SSL read — minutes of silence *after*
+`Parse safetensors files` has flown past at local-disk speed. `gen_subq.py`
+detects a complete snapshot in the HF cache and sets `HF_HUB_OFFLINE=1` itself
+(`--offline auto`, the default; `on`/`off` to force). A partial cache stays
+online, since offline mode would only turn a slow download into a hard failure.
+Pre-fetch with `hf download openai/gpt-oss-20b` — resumable, and it shows
+progress — rather than discovering the download inside the engine.
+
 Always `--dry-run --limit 20` first and read the samples. Watch the
 `placeholder leak` counter — self-containment is the entire point, and a model
 that reverts to `#1` has produced the raw-ablation arm by accident.

@@ -173,6 +173,72 @@ def fit_gpu_util(requested: float, free_mib: int, total_mib: int,
     return min(requested, round(usable, 3))
 
 
+def hf_cache_root() -> Path:
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def cached_snapshot(model: str) -> Path | None:
+    """Newest complete snapshot of `model` in the local HF cache, else None.
+
+    Walked by hand rather than through huggingface_hub, because the decision this
+    feeds — HF_HUB_OFFLINE — is read into module constants at import time. Import
+    the library to answer the question and you have already frozen the old value.
+
+    Snapshot entries are symlinks into blobs/, and a half-downloaded blob has no
+    symlink yet, so existence is a genuine completeness check. Where a shard
+    index is present every shard it names is verified.
+    """
+    if Path(model).expanduser().is_dir():  # already a local path
+        return Path(model).expanduser()
+
+    root = hf_cache_root() / f"models--{model.replace('/', '--')}" / "snapshots"
+    if not root.is_dir():
+        return None
+
+    for snap in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not (snap / "config.json").exists():
+            continue
+        index = snap / "model.safetensors.index.json"
+        if index.exists():
+            shards = set(json.loads(index.read_text()).get("weight_map", {}).values())
+            if shards and all((snap / s).exists() for s in shards):
+                return snap
+        elif any(snap.glob("*.safetensors")):
+            return snap
+    return None
+
+
+def preflight_hub(model: str, mode: str) -> None:
+    """Decide online vs offline before vLLM (and huggingface_hub) is imported.
+
+    vLLM re-resolves config and tokenizer files through the Hub even when every
+    byte is already cached. On a box with slow or filtered egress those HEAD
+    requests retry with backoff and the engine looks hung — several minutes of
+    silence after 'Parse safetensors files' has already sailed past at local-disk
+    speed. Cached weights mean there is nothing to ask the network for.
+    """
+    snap = cached_snapshot(model)
+    offline = mode == "on" or (mode == "auto" and snap is not None)
+
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        where = snap if snap else "not found in cache — --offline on was forced"
+        print(f"HF_HUB_OFFLINE=1  ({where})")
+        return
+
+    # Online: keep a stalled hub from masquerading as a hang.
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+    print(f"{model} not fully cached under {hf_cache_root()} — the engine will fetch it")
+    if not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")):
+        print("  no HF_TOKEN set: unauthenticated downloads are rate-limited and slower")
+    print("  a resumable pre-fetch is kinder than doing it inside the engine:")
+    print(f"    hf download {model}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset")
@@ -189,8 +255,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true", help="print samples, do not write")
+    ap.add_argument("--offline", choices=["auto", "on", "off"], default="auto",
+                    help="skip Hub round-trips. auto: offline when the model is cached.")
     args = ap.parse_args()
 
+    preflight_hub(args.model, args.offline)
     selected = pick_device(args.device, args.need_mib)
 
     gpu_util = args.gpu_util
