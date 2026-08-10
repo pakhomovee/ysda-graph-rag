@@ -131,12 +131,19 @@ Clone [DEEP-PolyU/LinearRAG](https://github.com/DEEP-PolyU/LinearRAG) separately
 from the copies here, and the dataset is named `2wikimultihop`, not
 `2wikimultihopqa`).
 
-`patches/linearrag_sigma_max.patch` applies to a clean checkout:
+LinearRAG is a **pinned submodule** at `third_party/LinearRAG`, so the patch can
+never apply to lines that upstream has since moved. It is GPL-3.0 and referenced,
+not vendored — the repo stores one gitlink, no source of theirs. `ignore = dirty`
+is set because we patch its working tree on purpose and that would otherwise show
+up as a permanent modification.
 
 ```bash
-git apply /path/to/mbuzai-rag/patches/linearrag_sigma_max.patch
-export PYTHONPATH=/path/to/mbuzai-rag:$PYTHONPATH   # for mbuzai.gate, mbuzai.subq_io
+bash scripts/setup_linearrag.sh    # init submodule, apply patch, verify. Idempotent.
 ```
+
+The script refuses to guess: if the patch neither applies nor is already applied,
+the submodule has drifted or has local edits, and it says so rather than
+half-patching.
 
 **What the retrieval actually does**, having read it rather than assumed: the gate
 is `sentence_similarities`, computed twice — in `calculate_entity_scores` (BFS)
