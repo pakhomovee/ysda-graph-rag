@@ -37,12 +37,31 @@ def rank_bm25(docs, questions, topk):
     return idx
 
 
-def embed(model_name, texts, batch_size, cache: Path | None):
+def resolve_device(spec: str) -> str:
+    if spec != "auto":
+        return spec
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
+def cache_path(name: str, model_name: str, kind: str) -> Path:
+    """Cache key includes the model — otherwise switching encoders silently
+    reuses the previous model's vectors."""
+    slug = model_name.rstrip("/").split("/")[-1]
+    return OUT / f"emb_{name}_{slug}_{kind}.npy"
+
+
+def embed(model_name, texts, batch_size, cache: Path | None, device: str):
     if cache and cache.exists():
+        print(f"  cached {cache.name}")
         return np.load(cache)
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(model_name, device="cpu")
+    model = SentenceTransformer(model_name, device=device)
     emb = model.encode(
         texts,
         batch_size=batch_size,
@@ -56,11 +75,11 @@ def embed(model_name, texts, batch_size, cache: Path | None):
     return emb
 
 
-def rank_dense(docs, questions, topk, model_name, batch_size, name):
+def rank_dense(docs, questions, topk, model_name, batch_size, name, device):
     import faiss
 
-    doc_emb = embed(model_name, docs, batch_size, OUT / f"emb_{name}_docs.npy")
-    q_emb = embed(model_name, questions, batch_size, OUT / f"emb_{name}_queries.npy")
+    doc_emb = embed(model_name, docs, batch_size, cache_path(name, model_name, "docs"), device)
+    q_emb = embed(model_name, questions, batch_size, cache_path(name, model_name, "queries"), device)
     index = faiss.IndexFlatIP(doc_emb.shape[1])
     index.add(doc_emb)
     _, idx = index.search(q_emb, topk)
@@ -86,26 +105,32 @@ def main():
     ap.add_argument("--model", default="sentence-transformers/all-mpnet-base-v2")
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--device", default="auto",
+                    help="cuda / cpu / auto. Dense encoding only; BM25 is CPU either way.")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
+    device = resolve_device(args.device)
     ds = dataio.load(args.dataset)
     if args.limit:
         ds.queries = ds.queries[: args.limit]
     docs = ds.docs
     questions = [q.question for q in ds.queries]
-    print(f"{ds.name}: {len(docs)} passages, {len(questions)} questions", flush=True)
+    print(f"{ds.name}: {len(docs)} passages, {len(questions)} questions "
+          f"| method={args.method} device={device}", flush=True)
 
     t0 = time.time()
     if args.method == "bm25":
         ranked = rank_bm25(docs, questions, args.topk)
     elif args.method == "dense":
-        ranked = rank_dense(docs, questions, args.topk, args.model, args.batch_size, ds.name)
+        ranked = rank_dense(docs, questions, args.topk, args.model,
+                            args.batch_size, ds.name, device)
     else:
         ranked = rrf(
             [
                 rank_bm25(docs, questions, args.topk * 3),
-                rank_dense(docs, questions, args.topk * 3, args.model, args.batch_size, ds.name),
+                rank_dense(docs, questions, args.topk * 3, args.model,
+                           args.batch_size, ds.name, device),
             ],
             args.topk,
         )
