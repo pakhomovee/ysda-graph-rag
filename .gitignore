@@ -1,5 +1,6 @@
 data/
 out/*.npy
+out/*_raw.jsonl
 out/*_bm25.json
 out/*_dense.json
 out/*_hybrid.json

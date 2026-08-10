@@ -88,6 +88,7 @@ python scripts/baselines.py musique --method dense
 python scripts/baselines.py musique --method hybrid
 python scripts/make_subq_ablations.py musique      # rows 4 and 5, no API
 python scripts/gen_subq.py musique                 # row 3, needs a GPU
+python scripts/eval_subq.py musique                # compare the sets — Gate B
 ```
 
 Everything writes to `out/`. Dense embeddings are cached per dataset, so only the
@@ -110,6 +111,18 @@ Three files, one shape (`{qid: [question, ...]}`), interchangeable downstream:
 
 `resolved` is Gate B. If it does not beat pooled `σ_q`, no generator will and the
 direction is dead — stop there and write the negative result.
+
+`eval_subq.py` runs that comparison without LinearRAG: it applies the same
+max-over-sub-questions rule at *passage* granularity and reports paired deltas
+against the pooled query, bucketed by hop count and by join shape. A proxy, not
+the method — no sentence gate, no graph propagation — but it shares the dense
+baseline's embedding cache, so it is nearly free, and a `resolved` arm that
+cannot win here will not win at sentence level either.
+
+`gen_subq.py` also writes `subq_<ds>_generated_raw.jsonl`, the untouched
+completions. Parsing sits downstream of a 20-minute GPU run, so
+`--reparse out/subq_musique_generated_raw.jsonl` rebuilds the set after a parser
+fix for free. This is not hypothetical; see below.
 
 ## Patching LinearRAG
 
@@ -175,6 +188,16 @@ that reverts to `#1` has produced the raw-ablation arm by accident.
   node. A sequential path cannot express them; handle or report.
 - **Small buckets.** n=166 at 4-hop, n=27 at 4hop2. `metrics` bootstraps CIs —
   never report a bare delta on those.
+- **Harmony channel names survive as prose.** Decoding with `skip_special_tokens`
+  deletes the `<|...|>` delimiters but keeps the channel *names*, so the output
+  arrives as `analysis<reasoning>assistantfinal<answer>` with no markup left to
+  match on. Matching only the marked-up forms sends the whole text — reasoning
+  included — to the line parser, and analysis prose ends in a question mark often
+  enough to pass for a sub-question: 733 of 910 on the first real run, undetected
+  by the `placeholder leak` counter because reasoning does not contain `#N`.
+  `extract_final` handles all three renderings and treats analysis-with-no-final
+  as empty rather than as content. Sanity check any new generator with
+  `--dry-run --limit 20` **and** grep the output for `assistantfinal`.
 - **Freeze before transfer.** Tune on MuSiQue only. Touching the method after
   seeing 2Wiki or HotpotQA numbers turns transfer results into tuning.
 

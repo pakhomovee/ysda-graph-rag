@@ -62,17 +62,42 @@ FINAL = re.compile(r"<\|channel\|>final<\|message\|>(.*?)(?:<\|return\|>|<\|end\
 STRIP_TAGS = re.compile(r"<\|[^|]*\|>")
 LEADER = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 PLACEHOLDER = re.compile(r"#\d")
+ANALYSIS_ONLY = re.compile(r"\s*analysis\b")
+# A real sub-question is one clause. Anything longer is reasoning that ended in a
+# question mark, which is exactly how the analysis channel gets in.
+MAX_SUBQ_CHARS = 200
 
 
 def extract_final(text: str) -> str:
-    """Return the final channel if harmony markup survived, else the whole text."""
+    """Return the final channel, or "" when the model never reached one.
+
+    Three renderings of the same harmony output have to be handled, because which
+    one arrives depends on tokenizer and vLLM version rather than on anything we
+    control:
+
+      1. markers intact   <|channel|>final<|message|>ANSWER
+      2. partly stripped  final<|message|>ANSWER
+      3. fully stripped   analysisREASONING...assistantfinalANSWER
+
+    Case 3 is the dangerous one. Decoding with skip_special_tokens deletes the
+    <|...|> delimiters but keeps the channel *names* as ordinary prose, so there
+    is no markup left to find and the analysis channel reads as content. Falling
+    back to the whole text there silently turns a page of the model's reasoning
+    into a sub-question — 733 of 910 on the first real run.
+
+    Analysis with no final channel means generation was truncated mid-reasoning.
+    That is an empty answer, not a free-text one; returning "" keeps it out of
+    the query set instead of poisoning it.
+    """
     m = FINAL.search(text)
     if m:
         return m.group(1)
-    # A reasoning parser may have stripped the markers but left the analysis prose;
-    # if a bare 'final' marker is present, cut at it.
     if "final<|message|>" in text:
-        text = text.split("final<|message|>", 1)[1]
+        return text.split("final<|message|>", 1)[1]
+    if "assistantfinal" in text:
+        return text.rsplit("assistantfinal", 1)[1]
+    if ANALYSIS_ONLY.match(text):
+        return ""
     return STRIP_TAGS.sub("", text)
 
 
@@ -80,9 +105,11 @@ def parse_questions(text: str, max_n: int = 6) -> list[str]:
     out = []
     for line in extract_final(text).splitlines():
         line = LEADER.sub("", line.strip()).strip()
-        if len(line) < 8 or not line.endswith("?"):
+        if len(line) < 8 or len(line) > MAX_SUBQ_CHARS or not line.endswith("?"):
             continue
         if line.lower().startswith(("here", "sure", "sub-question", "output")):
+            continue
+        if "assistantfinal" in line or "<|" in line:  # belt and braces on channel debris
             continue
         if line not in out:
             out.append(line)
@@ -239,6 +266,62 @@ def preflight_hub(model: str, mode: str) -> None:
     print(f"    hf download {model}")
 
 
+def report_parse(raw: list[dict], queries=None) -> dict:
+    """Parse raw completions into the sub-question set, and say what happened.
+
+    Truncation is broken out from empty parses because they call for different
+    fixes: truncated means the analysis channel ate the budget and --max-tokens
+    is too low, while empty-but-complete means the model answered in a shape the
+    parser does not accept.
+    """
+    result, empty, leaked, truncated = {}, [], [], []
+    for r in raw:
+        subqs = parse_questions(r["text"])
+        if r.get("finish_reason") == "length":
+            truncated.append(r["qid"])
+        if not subqs:
+            empty.append(r["qid"])
+        if any(PLACEHOLDER.search(s) for s in subqs):
+            leaked.append(r["qid"])
+        result[r["qid"]] = subqs
+
+    n = len(result)
+    lens = [len(v) for v in result.values()]
+    print(f"\nparsed          : {n - len(empty)}/{n} non-empty")
+    print(f"sub-qs each     : mean {sum(lens)/max(n,1):.2f}  "
+          f"min {min(lens, default=0)}  max {max(lens, default=0)}")
+    print(f"placeholder leak: {len(leaked)} questions  <- must be ~0; the whole point "
+          "is self-containment")
+    if truncated:
+        print(f"truncated       : {len(truncated)} hit --max-tokens mid-reasoning "
+              f"(first few: {truncated[:5]})")
+    if empty:
+        print(f"empty parses    : {len(empty)} (first few: {empty[:5]})")
+
+    qid = next((k for k, v in result.items() if v), None)
+    if qid:
+        original = next((r["question"] for r in raw if r["qid"] == qid), "")
+        print(f"\nexample  {qid}")
+        print(f"  ORIGINAL  {original}")
+        for s in result[qid]:
+            print(f"  -         {s}")
+    return result
+
+
+def reparse(dataset: str, path: Path, dest: Path | None) -> None:
+    """Rebuild the sub-question set from saved completions. No GPU, no model.
+
+    The parser sits downstream of a 20-minute generation run, so a bug in it used
+    to cost the whole run. With the raw text on disk it costs a second.
+    """
+    raw = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    print(f"reparsing {len(raw)} completions from {path}")
+    result = report_parse(raw)
+    dest = dest or OUT / f"subq_{dataset}_generated.json"
+    dest.write_text(json.dumps(result, indent=1))
+    print(f"\nwrote {dest}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset")
@@ -257,7 +340,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print samples, do not write")
     ap.add_argument("--offline", choices=["auto", "on", "off"], default="auto",
                     help="skip Hub round-trips. auto: offline when the model is cached.")
+    ap.add_argument("--reparse", type=Path, default=None,
+                    help="rebuild from a saved *_generated_raw.jsonl; no GPU needed")
+    ap.add_argument("--out", type=Path, default=None, help="override the output path")
     args = ap.parse_args()
+
+    if args.reparse:
+        reparse(args.dataset, args.reparse, args.out)
+        return
 
     preflight_hub(args.model, args.offline)
     selected = pick_device(args.device, args.need_mib)
@@ -307,35 +397,24 @@ def main():
     ]
     outputs = llm.chat(convos, sampling)
 
-    result, empty, leaked = {}, [], []
-    for q, o in zip(queries, outputs):
-        subqs = parse_questions(o.outputs[0].text)
-        if not subqs:
-            empty.append(q.qid)
-        if any(PLACEHOLDER.search(s) for s in subqs):
-            leaked.append(q.qid)
-        result[q.qid] = subqs
+    raw = [
+        {"qid": q.qid, "question": q.question, "text": o.outputs[0].text,
+         "finish_reason": o.outputs[0].finish_reason}
+        for q, o in zip(queries, outputs)
+    ]
 
-    n = len(result)
-    lens = [len(v) for v in result.values()]
-    print(f"\nparsed        : {n - len(empty)}/{n} non-empty")
-    print(f"sub-qs each   : mean {sum(lens)/max(n,1):.2f}  min {min(lens, default=0)}  max {max(lens, default=0)}")
-    print(f"placeholder leak: {len(leaked)} questions  <- must be ~0; the whole point is self-containment")
-    if empty:
-        print(f"empty parses  : {len(empty)} (first few: {empty[:5]})")
+    if not args.dry_run:
+        OUT.mkdir(exist_ok=True)
+        raw_dest = OUT / f"subq_{ds.name}_generated_raw.jsonl"
+        raw_dest.write_text("".join(json.dumps(r) + "\n" for r in raw))
+        print(f"\nwrote {raw_dest}  (raw completions — reparse without the GPU)")
 
-    qid = next((k for k, v in result.items() if v), None)
-    if qid:
-        print(f"\nexample  {qid}")
-        print(f"  ORIGINAL  {next(q.question for q in queries if q.qid == qid)}")
-        for s in result[qid]:
-            print(f"  -         {s}")
+    result = report_parse(raw, queries)
 
     if args.dry_run:
         print("\n--dry-run: nothing written")
         return
 
-    OUT.mkdir(exist_ok=True)
     dest = OUT / f"subq_{ds.name}_generated.json"
     dest.write_text(json.dumps(result, indent=1))
     print(f"\nwrote {dest}")
