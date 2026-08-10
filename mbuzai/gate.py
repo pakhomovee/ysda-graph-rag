@@ -15,6 +15,13 @@ The original question is always included in the set, so sigma_max >= sigma_q
 elementwise and the method cannot score below vanilla by construction.
 """
 
+# LinearRAG runs on Python 3.9, where `list[str] | None` in a signature is
+# evaluated at definition time and raises TypeError. Deferring annotations keeps
+# this module importable there. `mbuzai/__init__.py` is empty by design, so
+# importing mbuzai.gate pulls in nothing else — dataio and metrics have the same
+# 3.9 problem and must never become a dependency of the gate.
+from __future__ import annotations
+
 import numpy as np
 
 

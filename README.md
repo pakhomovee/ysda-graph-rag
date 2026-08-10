@@ -131,16 +131,50 @@ Clone [DEEP-PolyU/LinearRAG](https://github.com/DEEP-PolyU/LinearRAG) separately
 from the copies here, and the dataset is named `2wikimultihop`, not
 `2wikimultihopqa`).
 
-Find where the sentence-similarity vector is built:
+`patches/linearrag_sigma_max.patch` applies to a clean checkout:
 
 ```bash
-grep -rn "sigma\|sim(q\|query_emb\|encode(.*question" src/
+git apply /path/to/mbuzai-rag/patches/linearrag_sigma_max.patch
+export PYTHONPATH=/path/to/mbuzai-rag:$PYTHONPATH   # for mbuzai.gate, mbuzai.subq_io
 ```
 
-It is the `|S| × 1` gate in `a^t = MAX(Mᵀ(σ_q ⊙ (M a^{t-1})), a^{t-1})`. Replace with
-`mbuzai.gate.build_gate(model, sent_emb, question, subqs)`. Passing `subqs=None`
-reproduces vanilla exactly, so gate it behind a `--subq_file` flag and keep one
-binary for both arms.
+**What the retrieval actually does**, having read it rather than assumed: the gate
+is `sentence_similarities`, computed twice — in `calculate_entity_scores` (BFS)
+and `calculate_entity_scores_vectorized`, selected by `use_vectorized_retrieval`.
+Both feed a per-entity top-k sentence selection that decides which entities
+activate next; passages are then ranked by personalised PageRank in `run_ppr`.
+There is no `a^t = MAX(Mᵀ(σ_q ⊙ (M a^{t-1})), a^{t-1})` — that formula was our
+shorthand, and the real lever is *which sentences survive the per-entity top-k*.
+Raising σ still moves it, but say what it is.
+
+`question_embedding` reaches **four** call sites, not two. The patch changes only
+the two gate sites and threads a separate `(m, d)` query-set matrix to them.
+`dense_passage_retrieval` keeps the pooled vector, deliberately: it does
+`question_embedding.reshape(1, -1)`, so a matrix would silently flatten to
+`(1, m·d)` and corrupt passage scores — and more importantly, the claim is about
+the *sentence gate*, so leaving DPR pooled isolates the intervention. It also
+makes the measured effect conservative. Record it as a choice, not an oversight.
+
+Vanilla parity is by construction: with no sub-questions the query set is `(1, d)`
+and `sigma_max` reduces to the original dot product. Verified bitwise identical at
+43.7k × 768 in float32, not merely close. One binary serves both arms; the arm is
+selected by `--subq_file`.
+
+Sub-question files are keyed by our qids, which LinearRAG never sees — it gets
+`question_info["question"]`. Bridge that before running:
+
+```bash
+python scripts/export_subq_for_linearrag.py musique --subq out/subq_musique_generated.json
+```
+
+That re-keys by normalised question text and reports collisions (MuSiQue has one:
+two questions share text but carry different gold decompositions).
+
+Two things in their `run.py` that will bite: it hardcodes
+`os.environ["CUDA_VISIBLE_DEVICES"] = "4"`, and it constructs `LLM_Model` before
+any retrieval happens. For retrieval-only work, build `LinearRAGConfig` with
+`llm_model=None` and call `index()` then `retrieve()` directly — `retrieve` never
+touches the LLM.
 
 ## Generation on gpt-oss-20b
 
