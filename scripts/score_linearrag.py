@@ -1,0 +1,116 @@
+"""Score LinearRAG retrieval runs: recall@k per arm, plus the paired delta.
+
+Reads the chunk-id dumps from `run_linearrag_retrieval.py` and the gold mapping
+from `prepare_linearrag_gold.py`, and reuses `mbuzai.metrics.bootstrap_ci` so the
+CIs are the same estimator as everywhere else in the repo.
+
+The paired delta is the number that matters. Absolute recall here is over 1,354
+chunks of ~820 words, not 11,656 passages of ~80, so it is not comparable to
+`baselines.py` or `eval_subq.py` — but both arms see the identical corpus and the
+identical index, so vanilla vs sigma_max is clean.
+
+    python scripts/score_linearrag.py musique --runs out/linearrag_musique_*.json
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from mbuzai import dataio, metrics  # noqa: E402
+
+OUT = ROOT / "out"
+
+
+def recall_at(retrieved, gold, k):
+    if not gold:
+        return float("nan")
+    return len(set(retrieved[:k]) & set(gold)) / len(gold)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dataset", help="our dataset name, for the hop/shape breakdown")
+    ap.add_argument("--runs", type=Path, nargs="+", required=True)
+    ap.add_argument("--gold", type=Path, default=None)
+    ap.add_argument("--ks", type=int, nargs="*", default=[2, 5, 10])
+    ap.add_argument("--baseline", default="vanilla", help="arm the deltas are measured against")
+    args = ap.parse_args()
+
+    gold_path = args.gold or OUT / f"linearrag_gold_{args.dataset}.json"
+    gold = json.loads(gold_path.read_text())
+    arms = {p.stem.split("_")[-1]: json.loads(p.read_text()) for p in args.runs}
+    if args.baseline not in arms:
+        sys.exit(f"baseline arm {args.baseline!r} not among {sorted(arms)}")
+
+    # their id is ours with a source prefix; keep both so we can bucket by shape
+    ds = dataio.load(args.dataset)
+    by_qid = {q.qid: q for q in ds.queries}
+    qids = [t for t in gold if t.split("_", 1)[1] in by_qid
+            and all(t in a for a in arms.values())]
+    print(f"scoring {len(qids)} questions across arms: {', '.join(sorted(arms))}")
+    if len(qids) < len(gold):
+        print(f"  ({len(gold) - len(qids)} skipped: no gold chunks, or absent from a run)")
+
+    print(f"\nabsolute recall  (over LinearRAG's chunk corpus — NOT comparable to "
+          "baselines.py)")
+    per_q = {}
+    for name, run in sorted(arms.items()):
+        cells = []
+        for k in args.ks:
+            vals = [recall_at(run[t], gold[t], k) for t in qids]
+            per_q[(name, k)] = vals
+            cells.append(f"@{k}={sum(vals)/len(vals):.4f}")
+        print(f"  {name:<12} {'  '.join(cells)}")
+
+    # Kept in separate sections, as in eval_subq: on MuSiQue the shape labels and
+    # the depth labels overlap ("2hop" vs "2hop-chain"), and interleaving them
+    # alphabetically reads as duplicate rows rather than two different cuts.
+    depth, shape = {}, {}
+    for i, t in enumerate(qids):
+        q = by_qid[t.split("_", 1)[1]]
+        depth.setdefault(f"{q.n_hops}hop-{'join' if q.is_join else 'chain'}", []).append(i)
+        shape.setdefault(q.shape or "?", []).append(i)
+
+    others = [n for n in sorted(arms) if n != args.baseline]
+    for k in args.ks:
+        base = per_q[(args.baseline, k)]
+        print(f"\ndelta vs {args.baseline}, recall@{k}  (paired bootstrap 95% CI)")
+        print("  " + " " * 25 + "".join(f"{n:>25}" for n in others))
+
+        def row(label, idxs):
+            cells = []
+            for n in others:
+                d = [per_q[(n, k)][i] - base[i] for i in idxs
+                     if per_q[(n, k)][i] == per_q[(n, k)][i]]
+                if not d:
+                    cells.append(f"{'-':>25}")
+                    continue
+                lo, hi = metrics.bootstrap_ci(d)
+                if lo != lo:
+                    cells.append(f"{sum(d)/len(d):>+8.4f} {'(n<2)':>16}")
+                    continue
+                star = "*" if lo > 0 or hi < 0 else " "
+                cells.append(f"{sum(d)/len(d):>+8.4f} [{lo:+.3f},{hi:+.3f}]{star}")
+            print(f"  {label:<18} n={len(idxs):<4}" + "".join(cells))
+
+        row("all", list(range(len(qids))))
+        print("  -- depth x shape")
+        for label in sorted(depth):
+            row(label, depth[label])
+        print("  -- question type")
+        for label in sorted(shape):
+            row(label, shape[label])
+        print("  * = CI excludes zero")
+
+    dest = OUT / f"linearrag_{args.dataset}_scored.json"
+    dest.write_text(json.dumps(
+        {f"{n}@{k}": sum(v) / len(v) for (n, k), v in per_q.items()}, indent=1))
+    print(f"\nwrote {dest}")
+
+
+if __name__ == "__main__":
+    main()

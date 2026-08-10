@@ -9,3 +9,4 @@ __pycache__/
 .venv/
 /subq_*.json
 out/*_bytext.json
+out/linearrag_*

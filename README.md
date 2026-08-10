@@ -179,9 +179,51 @@ two questions share text but carry different gold decompositions).
 
 Two things in their `run.py` that will bite: it hardcodes
 `os.environ["CUDA_VISIBLE_DEVICES"] = "4"`, and it constructs `LLM_Model` before
-any retrieval happens. For retrieval-only work, build `LinearRAGConfig` with
-`llm_model=None` and call `index()` then `retrieve()` directly — `retrieve` never
+any retrieval happens. `run_linearrag_retrieval.py` sidesteps both — it builds the
+config with `llm_model=None` and calls `index()` then `retrieve()`, which never
 touches the LLM.
+
+### Their corpus is not our corpus
+
+This is the thing to internalise before reading any LinearRAG number:
+
+|  | passages | mean length |
+|---|---|---|
+| ours (`data/musique_corpus.json`) | 11,656 | ~80 words |
+| theirs (`dataset/musique/chunks.json`) | 1,354 | ~820 words |
+
+They concatenate the source passages into ~1000-token chunks, so one chunk holds
+roughly ten of ours and 0/1354 match ours as text. **Recall@k over their chunks is
+mechanically easier and is not comparable to `baselines.py` or `eval_subq.py`.**
+Vanilla vs σ_max stays clean — same corpus, same index, same everything but the
+query set — so report the paired delta and never a cross-corpus absolute.
+
+Their `questions.json` also carries no gold labels (`evidence` is `""` on every
+row), so gold comes from our copy: `prepare_linearrag_gold.py` locates each of our
+gold passages inside a chunk by normalised substring (1,399/1,456 found; 998/1000
+questions scorable, mean 2.19 gold chunks from 2.65 gold passages). Their question
+ids are ours with a source prefix (`musique_2hop__13548_13529`), matching
+1000/1000 — no text join needed.
+
+### Running it
+
+```bash
+python scripts/prepare_linearrag_gold.py musique --bundle third_party/LinearRAG/dataset/musique
+python scripts/export_subq_for_linearrag.py musique --subq out/subq_musique_generated.json
+
+cd third_party/LinearRAG                       # their relative paths need this cwd
+export PYTHONPATH=/path/to/mbuzai-rag:$PYTHONPATH
+python /path/to/mbuzai-rag/scripts/run_linearrag_retrieval.py \
+    --dataset_name musique --device 3 --retrieval_top_k 10 \
+    --subq_file /path/to/mbuzai-rag/out/subq_musique_generated_bytext.json \
+    --out /path/to/mbuzai-rag/out/linearrag_musique
+
+cd -                                           # back in the mbuzai env
+python scripts/score_linearrag.py musique --runs out/linearrag_musique_*.json
+```
+
+Both arms run in one process against one index, so they cannot differ by anything
+except the query set — no re-chunking, no re-embedding, no second NER pass.
 
 ## Generation on gpt-oss-20b
 
