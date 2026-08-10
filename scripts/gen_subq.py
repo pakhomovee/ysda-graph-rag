@@ -24,7 +24,9 @@ arm reads the same shape regardless of where its sub-questions came from.
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -83,11 +85,79 @@ def parse_questions(text: str, max_n: int = 6) -> list[str]:
     return out[:max_n]
 
 
+def gpu_table() -> list[tuple[int, int, int]]:
+    """(index, free_MiB, total_MiB) via nvidia-smi.
+
+    Deliberately a subprocess rather than torch: querying through torch would
+    initialise a CUDA context in this process, after which setting
+    CUDA_VISIBLE_DEVICES has no effect.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.free,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.strip().splitlines():
+        i, free, total = (x.strip() for x in line.split(","))
+        rows.append((int(i), int(free), int(total)))
+    return rows
+
+
+def pick_device(requested: str | None, need_mib: int) -> None:
+    """Set CUDA_VISIBLE_DEVICES before vLLM is imported, and fail loudly if the
+    chosen GPU is already occupied.
+
+    gpt-oss-20b needs roughly 13 GB of weights plus KV cache; a card with a few
+    hundred MiB free cannot even create a CUDA context, which surfaces as an
+    opaque OOM inside MemorySnapshot rather than as 'this GPU is busy'.
+    """
+    if requested is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = requested
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        print(f"CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+
+    rows = gpu_table()
+    if not rows:
+        print("nvidia-smi unavailable — skipping GPU preflight")
+        return
+
+    print("\ngpu   free / total (MiB)")
+    for i, free, total in rows:
+        print(f"  {i}   {free:>6} / {total:>6}{'   <- busy' if free < need_mib else ''}")
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        wanted = {int(x) for x in visible.split(",") if x.strip().isdigit()}
+        rows = [r for r in rows if r[0] in wanted] or rows
+    else:
+        best = max(rows, key=lambda r: r[1])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(best[0])
+        print(f"\nauto-selected GPU {best[0]} ({best[1]} MiB free)")
+        rows = [best]
+
+    if max(r[1] for r in rows) < need_mib:
+        sys.exit(
+            f"\nFATAL: no selected GPU has {need_mib} MiB free.\n"
+            "  Another process owns it. Check:  nvidia-smi --query-compute-apps="
+            "pid,used_memory --format=csv\n"
+            "  Then pick a free card:           --device 1\n"
+            "  Or clear your own stale run:     pkill -f EngineCore"
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset")
     ap.add_argument("--model", default="openai/gpt-oss-20b")
     ap.add_argument("--tp", type=int, default=1, help="tensor parallel size")
+    ap.add_argument("--device", default=None,
+                    help="GPU index, e.g. 1 or 0,1. Default: auto-pick the freest.")
+    ap.add_argument("--need-mib", type=int, default=20000,
+                    help="minimum free VRAM to consider a GPU usable")
     ap.add_argument("--gpu-util", type=float, default=0.85)
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--max-tokens", type=int, default=1024, help="room for the analysis channel")
@@ -97,9 +167,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print samples, do not write")
     args = ap.parse_args()
 
+    pick_device(args.device, args.need_mib)
+
     ds = dataio.load(args.dataset)
     queries = ds.queries[: args.limit] if args.limit else ds.queries
-    print(f"{ds.name}: generating for {len(queries)} questions with {args.model}", flush=True)
+    print(f"\n{ds.name}: generating for {len(queries)} questions with {args.model}", flush=True)
 
     from vllm import LLM, SamplingParams
 
