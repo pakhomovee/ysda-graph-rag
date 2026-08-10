@@ -103,6 +103,37 @@ def load_musique(name: str = "musique") -> Dataset:
     return Dataset(name, corpus, queries)
 
 
+# Two independent branches merging on a comparison. The linear-path assumption
+# does not hold for these, which is precisely why they are worth measuring.
+JOIN_TYPES = {"comparison", "bridge_comparison"}
+
+
+def _hops_from_evidences(evidences, by_title) -> list[Hop]:
+    """Templated sub-questions from 2Wiki's gold (subject, relation, object) triples.
+
+    2Wiki ships no natural-language decomposition, but the evidence triples are
+    one: ("God's Gift to Women", "director", "Michael Curtiz") is a step, and its
+    supporting passage is the one titled by the subject — the evidence subjects
+    line up with `supporting_facts` titles.
+
+    A subject that repeats an earlier step's object is a bridge the questioner
+    could not know, so it is emitted as `#N` exactly as MuSiQue writes its own
+    placeholders. That makes these hops drop straight into
+    `make_subq_ablations.resolve()` and gives 2Wiki the same raw/resolved pair.
+
+    The phrasing is templated, not human-written. Arms stay comparable *within*
+    2Wiki; its oracle is not comparable to MuSiQue's in absolute terms.
+    """
+    objects = [obj for _subj, _rel, obj in evidences]
+    hops = []
+    for i, (subj, rel, obj) in enumerate(evidences):
+        earlier = next((j for j in range(i) if objects[j] == subj), None)
+        label = f"#{earlier + 1}" if earlier is not None else subj
+        pids = by_title.get(subj, [])
+        hops.append(Hop(f"What is the {rel} of {label}?", obj, pids[0] if pids else None))
+    return hops
+
+
 def load_2wiki(name: str = "2wikimultihopqa") -> Dataset:
     corpus, _, by_title = _load_corpus(name)
     raw = json.loads((DATA / f"{name}.json").read_text())
@@ -116,15 +147,17 @@ def load_2wiki(name: str = "2wikimultihopqa") -> Dataset:
             for title, _sent_idx in ex["supporting_facts"]
             for pid in by_title.get(title, [])
         }
+        hops = _hops_from_evidences(ex.get("evidences", []), by_title)
         queries.append(
             Query(
                 qid=ex["_id"],
                 question=ex["question"],
                 answer=ex["answer"],
                 gold_pids=gold,
-                hops=[],  # 2Wiki has no sub-questions; it has gold triples instead
+                hops=hops,
                 shape=ex["type"],
-                n_hops=len(ex.get("evidences", [])) or len(ex["supporting_facts"]),
+                n_hops=len(hops) or len(ex["supporting_facts"]),
+                is_join=ex["type"] in JOIN_TYPES,
             )
         )
     return Dataset(name, corpus, queries)

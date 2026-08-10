@@ -207,3 +207,46 @@ MuSiQue: 11,656 passages, 930k words, ~43.7k sentences, 1,000 questions.
 869 pure chains / 131 joins. 57.3% of gold sub-questions carry a `#N` placeholder
 and every question has at least one — which is why the method generates rather
 than reuses them.
+
+2Wiki: 6,119 passages, 1,000 questions. 413 compositional / 244 comparison /
+235 bridge_comparison / 108 inference; 479 joins.
+
+## The oracle leaks — read `resolved` accordingly
+
+`resolved` substitutes each `#N` with the gold answer of step N. On MuSiQue,
+1,648 of 2,648 hops then contain their answer string inside the sub-question, and
+**every one of those strings also appears in the gold passage.** "When was Diego
+Maradona signed by Barcelona?" retrieves the Maradona passage because it was
+handed the word "Maradona" — but Maradona *is* the bridge, the thing you do not
+know.
+
+So `resolved` is a valid necessary gate and **not a reachable target.** The
+generated→resolved gap is mostly information unavailable at inference, not
+generator headroom, and closing it by scaling the generator is not possible: no
+model can know the bridge entity from the question alone. Measured on the
+passage proxy: pooled 0.573 recall@10, resolved 0.842, generated 0.616.
+
+## Pre-registered: the 2Wiki transfer
+
+Written before running `eval_subq.py` on 2Wiki. The mechanism says sub-query
+gating pays off where decomposition is possible *without* oracle knowledge, which
+is what comparison questions give you — both entities are named in the question,
+so the sub-questions are self-contained with nothing to look up first. A single
+pooled vector also cannot rank two targets at once; a max over two sub-questions
+can. Hence:
+
+1. `comparison` ≫ `compositional`. No unknown bridge, and two retrieval targets a
+   single query vector must serve simultaneously.
+2. `bridge_comparison` shows the largest gain — join-shaped *and* 4 hops, so both
+   predicted effects compound.
+3. `compositional` lands near MuSiQue's +0.05, being the same unknown-bridge
+   shape as a MuSiQue chain.
+4. Depth scaling holds within 2Wiki as it does on MuSiQue.
+
+Known caps before looking: `bridge_comparison` has 4 gold passages, so recall@2
+cannot exceed 0.5 there — read @5/@10. 2Wiki's sub-questions are templated from
+`evidences` triples, so its oracle is comparable *within* 2Wiki only, never
+against MuSiQue's human-written decompositions.
+
+MuSiQue stays the primary result whatever 2Wiki says. This is a scope condition
+being tested, not a headline being shopped for.

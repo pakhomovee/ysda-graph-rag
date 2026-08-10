@@ -6,9 +6,12 @@ granularity and with no graph propagation:
 
     score[p] = max_j sim(q_j, passage_p)        vs      sim(question, passage_p)
 
-**It is a proxy, not the method.** LinearRAG gates ~43.7k sentences and then
-propagates activation through the bipartite graph; this ranks 11,656 passages
-directly. A win here is necessary but not sufficient evidence for the real gate.
+**It is a proxy, not the method.** LinearRAG gates sentences, iterates a top-k
+selection per entity, and ranks passages by personalised PageRank over the
+result; this ranks passages directly by the gate. A win here is necessary but not
+sufficient evidence for the real gate, and the missing propagation is exactly
+what would carry signal past hop 1 — so this understates the method where the
+method is supposed to work.
 What it does give you, today and on a laptop, is the comparison that decides
 whether to keep going: if `resolved` — the oracle — cannot beat the pooled query
 on passage recall, it will not rescue the sentence-level gate either.
@@ -80,37 +83,60 @@ def per_query_recall(ds, ranked, k):
     return [_recall(r, q.gold_pids, k) for r, q in zip(ranked, ds.queries)]
 
 
-def delta_table(ds, base, arms, k):
-    """Paired deltas vs the pooled-query baseline, overall and by hop count.
+def delta_table(ds, base, arms, covered, k):
+    """Paired deltas vs the pooled-query baseline, split three ways.
 
     Paired because the arms see identical questions: the per-question difference
     has far less variance than the difference of two independent means, and the
-    4-hop buckets are too small (n=166, n=27) to see anything otherwise.
+    small buckets (MuSiQue 4hop2 n=27) show nothing otherwise.
+
+    Depth and join-ness are crossed rather than reported separately. A join
+    question belongs to both, so a flat `join` row is compared against hop rows
+    that contain those very questions — which cannot test "joins beat chains of
+    equal depth". `{n}hop-chain` vs `{n}hop-join` can.
+
+    The shape rows are the axis 2Wiki turns on (comparison / bridge_comparison /
+    compositional / inference); on MuSiQue they recover the hop-shape labels.
     """
     base_r = per_query_recall(ds, base, k)
-    lines = [f"\ndelta vs pooled sigma_q, recall@{k}  (paired bootstrap 95% CI)"]
+    arm_r = {name: per_query_recall(ds, ranked, k) for name, ranked in arms.items()}
 
-    buckets: dict[str, list[int]] = {"all": list(range(len(ds.queries)))}
+    def cell(name, idxs):
+        d = [arm_r[name][i] - base_r[i] for i in idxs if arm_r[name][i] == arm_r[name][i]]
+        if not d:
+            return f"{'-':>25}"
+        lo, hi = metrics.bootstrap_ci(d)
+        if lo != lo:  # bucket too small to bootstrap — say so rather than print nan
+            return f"{np.mean(d):>+8.4f} {'(n<2)':>16}"
+        star = "*" if lo > 0 or hi < 0 else " "
+        return f"{np.mean(d):>+8.4f} [{lo:+.3f},{hi:+.3f}]{star}"
+
+    depth: dict[str, list[int]] = {}
+    shape: dict[str, list[int]] = {}
     for i, q in enumerate(ds.queries):
-        buckets.setdefault(f"{q.n_hops}hop", []).append(i)
-        if q.is_join:
-            buckets.setdefault("join", []).append(i)
+        depth.setdefault(f"{q.n_hops}hop-{'join' if q.is_join else 'chain'}", []).append(i)
+        shape.setdefault(q.shape or "?", []).append(i)
 
-    header = "  " + " " * 16 + "".join(f"{name:>25}" for name in arms)
-    lines.append(header)
-    for label in ["all"] + sorted(k for k in buckets if k != "all"):
-        idxs = buckets[label]
-        cells = []
-        for name, ranked in arms.items():
-            arm_r = per_query_recall(ds, ranked, k)
-            d = [arm_r[i] - base_r[i] for i in idxs if arm_r[i] == arm_r[i]]
-            if not d:
-                cells.append(f"{'-':>22}")
-                continue
-            lo, hi = metrics.bootstrap_ci(d)
-            star = "*" if lo > 0 or hi < 0 else " "
-            cells.append(f"{np.mean(d):>+8.4f} [{lo:+.3f},{hi:+.3f}]{star}")
-        lines.append(f"  {label:<10} n={len(idxs):<4}" + "".join(cells))
+    lines = [f"\ndelta vs pooled sigma_q, recall@{k}  (paired bootstrap 95% CI)"]
+    lines.append("  " + " " * 25 + "".join(f"{name:>25}" for name in arms))
+
+    def section(buckets, title=None):
+        if title:
+            lines.append(f"  -- {title}")
+        for label in sorted(buckets):
+            idxs = buckets[label]
+            lines.append(f"  {label:<18} n={len(idxs):<4}"
+                         + "".join(cell(name, idxs) for name in arms))
+
+    section({"all": list(range(len(ds.queries)))})
+    section(depth, "depth x shape")
+    section(shape, "question type")
+
+    # Coverage differs per arm, so this cannot be a row in the table above.
+    lines.append("  -- coverage-corrected (only questions where the arm has sub-questions)")
+    for name in arms:
+        idxs = covered[name]
+        lines.append(f"  {name:<18} n={len(idxs):<4}" + cell(name, idxs))
     lines.append("  * = CI excludes zero")
     return "\n".join(lines)
 
@@ -142,20 +168,21 @@ def main():
         baselines.cache_path(ds.name, args.model, "docs"), device,
     )
 
-    arms, reports = {}, {}
+    arms, reports, covered = {}, {}, {}
     base = rank_arm(ds, doc_emb, None, args.model, args.batch_size, device, args.topk)
     reports["pooled"] = metrics.evaluate(ds, base, ks=tuple(args.k_report))
 
     for path in files:
         subq = load_subq(path)
         name = path.stem.replace(f"subq_{args.dataset}_", "")
-        covered = sum(1 for q in ds.queries if subq.get(q.qid))
+        covered[name] = [i for i, q in enumerate(ds.queries) if subq.get(q.qid)]
         sizes = [len(subq.get(q.qid, [])) for q in ds.queries]
-        print(f"\n{name:<10} {covered}/{len(ds.queries)} questions have sub-questions, "
-              f"mean {np.mean(sizes):.2f} each")
-        if covered < len(ds.queries):
-            print(f"           {len(ds.queries) - covered} fall back to the question alone "
-                  "— they dilute the delta toward zero, they do not bias it")
+        print(f"\n{name:<10} {len(covered[name])}/{len(ds.queries)} questions have "
+              f"sub-questions, mean {np.mean(sizes):.2f} each")
+        if len(covered[name]) < len(ds.queries):
+            print(f"           {len(ds.queries) - len(covered[name])} fall back to the "
+                  "question alone — their delta is exactly zero, so they dilute the "
+                  "mean without biasing it")
         arms[name] = rank_arm(ds, doc_emb, subq, args.model, args.batch_size,
                               device, args.topk)
         reports[name] = metrics.evaluate(ds, arms[name], ks=tuple(args.k_report))
@@ -167,7 +194,7 @@ def main():
         print(f"  {name:<12} {cells}")
 
     for k in args.k_report:
-        print(delta_table(ds, base, arms, k))
+        print(delta_table(ds, base, arms, covered, k))
 
     dest = OUT / f"{ds.name}_subq_eval.json"
     dest.write_text(json.dumps(reports, indent=1))

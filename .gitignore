@@ -7,3 +7,4 @@ out/*_hybrid.json
 __pycache__/
 *.pyc
 .venv/
+/subq_*.json
