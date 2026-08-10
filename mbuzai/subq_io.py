@@ -42,6 +42,23 @@ def load_query_sets(path):
         return json.load(fh)
 
 
+def match_qid(their_id, our_qids):
+    """Their question id expressed as ours, or None.
+
+    The bundle is not consistent about this: MuSiQue rows are prefixed with the
+    source (`musique_2hop__13548_13529`) while 2Wiki rows are the bare hex id
+    that we already use. Splitting on "_" unconditionally works on one and raises
+    IndexError on the other, so try the id as-is first and only then strip a
+    leading source token — and only if what remains is a qid we recognise.
+    """
+    if their_id in our_qids:
+        return their_id
+    _head, sep, tail = their_id.partition("_")
+    if sep and tail in our_qids:
+        return tail
+    return None
+
+
 def lookup(query_sets, question):
     """Sub-questions for `question`, or None if this question has no set.
 

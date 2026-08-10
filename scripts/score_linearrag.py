@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from mbuzai import dataio, metrics  # noqa: E402
+from mbuzai.subq_io import match_qid  # noqa: E402
 
 OUT = ROOT / "out"
 
@@ -46,10 +47,12 @@ def main():
     if args.baseline not in arms:
         sys.exit(f"baseline arm {args.baseline!r} not among {sorted(arms)}")
 
-    # their id is ours with a source prefix; keep both so we can bucket by shape
+    # their ids are keyed inconsistently across datasets; match_qid absorbs that.
+    # Keys stay in their form so the run dumps line up, and resolve to ours for
+    # the hop/shape buckets.
     ds = dataio.load(args.dataset)
     by_qid = {q.qid: q for q in ds.queries}
-    qids = [t for t in gold if t.split("_", 1)[1] in by_qid
+    qids = [t for t in gold if match_qid(t, by_qid)
             and all(t in a for a in arms.values())]
     print(f"scoring {len(qids)} questions across arms: {', '.join(sorted(arms))}")
     if len(qids) < len(gold):
@@ -71,7 +74,7 @@ def main():
     # alphabetically reads as duplicate rows rather than two different cuts.
     depth, shape = {}, {}
     for i, t in enumerate(qids):
-        q = by_qid[t.split("_", 1)[1]]
+        q = by_qid[match_qid(t, by_qid)]
         depth.setdefault(f"{q.n_hops}hop-{'join' if q.is_join else 'chain'}", []).append(i)
         shape.setdefault(q.shape or "?", []).append(i)
 

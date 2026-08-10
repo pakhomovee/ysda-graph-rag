@@ -207,6 +207,20 @@ ids are ours with a source prefix (`musique_2hop__13548_13529`), matching
 
 ### Running it
 
+One script per dataset does the whole thing — preflight, gold, arms, score:
+
+```bash
+bash scripts/run_linear_musique.sh
+bash scripts/run_linear_wiki.sh
+bash scripts/run_linear_musique.sh out/subq_musique_resolved.json   # oracle arm
+```
+
+Retrieval needs LinearRAG's 3.9 interpreter and the rest needs the mbuzai env, so
+point `PY39` at the former: `PY39=~/.venv39/bin/python bash scripts/run_linear_musique.sh`.
+`DEVICE` (default 3), `TOPK` (10) and `EMB` are overridable the same way.
+
+The steps, if you would rather drive them by hand:
+
 ```bash
 python scripts/prepare_linearrag_gold.py musique --bundle third_party/LinearRAG/dataset/musique
 python scripts/export_subq_for_linearrag.py musique --subq out/subq_musique_generated.json
