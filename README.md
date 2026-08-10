@@ -61,10 +61,22 @@ pip install -r requirements.txt
 # generation — uv fetches the interpreter, no sudo, no conda
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.12 .venv-gen
-. .venv-gen/bin/activate && uv pip install vllm
+. .venv-gen/bin/activate
+uv pip install "vllm>=0.26" --torch-backend=auto
+python -c "import vllm; print(vllm.__version__)"   # sanity: must be >= 0.10
 ```
 
+Both arguments matter. **`--torch-backend=auto`** lets uv select the right CUDA
+torch wheel; without it torch resolution fails, uv backtracks looking for a vLLM
+whose deps it *can* satisfy, and lands on a 2023 release — which then dies with
+`KeyError: 'type'` in `_get_and_verify_max_len`, because configs of that era used
+`rope_scaling["type"]` rather than `rope_type`. **The `>=0.26` floor** turns that
+silent backtrack into an honest resolution error. gpt-oss needs ≥ 0.10.0 at
+minimum; take current.
+
 Let vLLM pull its own `torch`; do not pre-install a CPU wheel into `.venv-gen`.
+If an ancient vLLM already landed there, delete the venv and start over rather
+than upgrading in place — it dragged old `transformers` and friends in with it.
 
 ## Steps
 
