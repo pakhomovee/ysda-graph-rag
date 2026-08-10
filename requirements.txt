@@ -1,0 +1,11 @@
+# analysis + retrieval baselines (CPU-friendly)
+numpy
+huggingface_hub
+bm25s
+PyStemmer
+faiss-cpu
+sentence-transformers
+torch                 # CPU: --index-url https://download.pytorch.org/whl/cpu
+
+# sub-question generation (GPU box only)
+vllm                  # >=0.10 for gpt-oss support

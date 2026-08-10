@@ -1,0 +1,8 @@
+data/
+out/*.npy
+out/*_bm25.json
+out/*_dense.json
+out/*_hybrid.json
+__pycache__/
+*.pyc
+.venv/
