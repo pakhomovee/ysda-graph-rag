@@ -38,13 +38,33 @@ out/                embeddings cache, sub-question sets, result JSON
 
 ## Install
 
+**Use three environments.** They have incompatible Python requirements and there
+is no reason to reconcile them — the handoff between generation and LinearRAG is
+a JSON file on disk, not an import.
+
+| env | Python | contents |
+|---|---|---|
+| `mbuzai` (this repo) | 3.10–3.14 | analysis, metrics, retrieval baselines |
+| generation | **3.12** | `vllm` + gpt-oss-20b, GPU box only |
+| LinearRAG | 3.9 | its own clone, its own `requirements.txt` |
+
+Python 3.14 will fail the generation install. vLLM itself supports 3.10–3.14
+since 0.20.0, but parts of its dependency tree still guard `<3.14` and the build
+dies in `_guard_py_ver`. 3.12 is vLLM's recommended version; take it.
+
 ```bash
+# this repo — any modern Python
 python -m venv .venv && . .venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU box
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU box only
 pip install -r requirements.txt
+
+# generation — uv fetches the interpreter, no sudo, no conda
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv --python 3.12 .venv-gen
+. .venv-gen/bin/activate && uv pip install vllm
 ```
 
-`vllm` is only needed on the GPU box, for `gen_subq.py`.
+Let vLLM pull its own `torch`; do not pre-install a CPU wheel into `.venv-gen`.
 
 ## Steps
 

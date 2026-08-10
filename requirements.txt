@@ -7,5 +7,7 @@ faiss-cpu
 sentence-transformers
 torch                 # CPU: --index-url https://download.pytorch.org/whl/cpu
 
-# sub-question generation (GPU box only)
-vllm                  # >=0.10 for gpt-oss support
+# sub-question generation (GPU box only) — SEPARATE ENV, PYTHON 3.12.
+# Do not install vllm here. Python 3.14 breaks the build: parts of the dep tree
+# still guard <3.14 and fail in _guard_py_ver. See README > Install.
+#   uv venv --python 3.12 .venv-gen && . .venv-gen/bin/activate && uv pip install vllm
