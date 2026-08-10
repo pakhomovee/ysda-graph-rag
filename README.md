@@ -93,6 +93,11 @@ python scripts/gen_subq.py musique                 # row 3, needs a GPU
 Everything writes to `out/`. Dense embeddings are cached per dataset, so only the
 first dense run pays the encode cost.
 
+Every step except `gen_subq.py` runs in the `mbuzai` env. `.venv-gen` has numpy
+and a CUDA torch but none of the retrieval stack, so `baselines.py` gets far
+enough to print `device=cuda` there before failing — it now checks its imports up
+front and names the env instead.
+
 ### Sub-question sets
 
 Three files, one shape (`{qid: [question, ...]}`), interchangeable downstream:
@@ -129,6 +134,13 @@ binary for both arms.
 Single A100 40GB is enough — ~12–13 GB of MXFP4 weights. Ampere has no native
 MXFP4 so vLLM upcasts to bf16 for the dot product; slower than Hopper, immaterial
 at 1k prompts.
+
+**A card with room to spare is not the same as an idle card.** `gpu_memory_utilization`
+is a fraction of *total* VRAM, not free VRAM, so the 0.85 default asks for 34.8 GB
+of a 40 GB A100 and vLLM aborts at startup if a neighbour already holds 15 GB.
+`gen_subq.py` caps the fraction at what the selected card actually has free and
+prints the adjustment; `--need-mib` is a separate, absolute floor and does not
+catch this on its own.
 
 **Do not use `guided_json`.** vLLM
 [#37359](https://github.com/vllm-project/vllm/issues/37359): harmony channel

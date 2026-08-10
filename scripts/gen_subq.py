@@ -37,6 +37,10 @@ OUT = Path(__file__).resolve().parent.parent / "out"
 
 SYSTEM = "Reasoning: low"
 
+# MXFP4 weights of gpt-oss-20b, with a little slack. The floor below which a
+# card cannot hold the model at all, never mind a KV cache.
+WEIGHTS_MIB = 14000
+
 PROMPT = """Break the question below into 3-5 sub-questions, each targeting one \
 fact needed to answer it.
 
@@ -107,13 +111,17 @@ def gpu_table() -> list[tuple[int, int, int]]:
     return rows
 
 
-def pick_device(requested: str | None, need_mib: int) -> None:
+def pick_device(requested: str | None, need_mib: int) -> tuple[int, int] | None:
     """Set CUDA_VISIBLE_DEVICES before vLLM is imported, and fail loudly if the
     chosen GPU is already occupied.
 
     gpt-oss-20b needs roughly 13 GB of weights plus KV cache; a card with a few
     hundred MiB free cannot even create a CUDA context, which surfaces as an
     opaque OOM inside MemorySnapshot rather than as 'this GPU is busy'.
+
+    Returns (free_MiB, total_MiB) for the selected card, or None if nvidia-smi
+    told us nothing. Under tensor parallelism the tightest card is the binding
+    constraint, so the minimum across the selection is what comes back.
     """
     if requested is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = requested
@@ -123,7 +131,7 @@ def pick_device(requested: str | None, need_mib: int) -> None:
     rows = gpu_table()
     if not rows:
         print("nvidia-smi unavailable — skipping GPU preflight")
-        return
+        return None
 
     print("\ngpu   free / total (MiB)")
     for i, free, total in rows:
@@ -148,6 +156,22 @@ def pick_device(requested: str | None, need_mib: int) -> None:
             "  Or clear your own stale run:     pkill -f EngineCore"
         )
 
+    return min(r[1] for r in rows), min(r[2] for r in rows)
+
+
+def fit_gpu_util(requested: float, free_mib: int, total_mib: int,
+                 headroom_mib: int = 1024) -> float:
+    """Cap gpu_memory_utilization at what the card actually has left.
+
+    vLLM measures the fraction against TOTAL memory, not free memory, so on a
+    shared box the default is a crash waiting to happen: 0.85 of a 40 GB A100 is
+    34.8 GB, and vLLM refuses to start when a neighbouring process already holds
+    enough that only 25 GB remains. The absolute --need-mib floor above does not
+    catch this — it never looks at the fraction.
+    """
+    usable = max(free_mib - headroom_mib, 0) / total_mib
+    return min(requested, round(usable, 3))
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -167,18 +191,33 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print samples, do not write")
     args = ap.parse_args()
 
-    pick_device(args.device, args.need_mib)
+    selected = pick_device(args.device, args.need_mib)
+
+    gpu_util = args.gpu_util
+    if selected:
+        free, total = selected
+        gpu_util = fit_gpu_util(args.gpu_util, free, total)
+        if gpu_util < args.gpu_util:
+            print(f"\ngpu-util {args.gpu_util} -> {gpu_util}: the fraction is of TOTAL "
+                  f"({total} MiB) and only {free} MiB is free")
+        if gpu_util * total < WEIGHTS_MIB:
+            sys.exit(
+                f"\nFATAL: {gpu_util * total:.0f} MiB budget on this card, but "
+                f"{args.model} needs ~{WEIGHTS_MIB} MiB of weights before any KV cache.\n"
+                "  Wait for the card, or pick another:  --device 1"
+            )
 
     ds = dataio.load(args.dataset)
     queries = ds.queries[: args.limit] if args.limit else ds.queries
     print(f"\n{ds.name}: generating for {len(queries)} questions with {args.model}", flush=True)
+    print("loading vllm + torch (first import is slow, ~30-60s) ...", flush=True)
 
     from vllm import LLM, SamplingParams
 
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tp,
-        gpu_memory_utilization=args.gpu_util,
+        gpu_memory_utilization=gpu_util,
         max_model_len=args.max_model_len,
         seed=args.seed,
     )

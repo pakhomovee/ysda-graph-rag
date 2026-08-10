@@ -21,6 +21,35 @@ from mbuzai import dataio, metrics  # noqa: E402
 
 OUT = Path(__file__).resolve().parent.parent / "out"
 
+# import name -> pip name, per method. Checked up front; see require().
+DEPS = {
+    "bm25": [("bm25s", "bm25s"), ("Stemmer", "PyStemmer")],
+    "dense": [("faiss", "faiss-cpu"), ("sentence_transformers", "sentence-transformers")],
+}
+DEPS["hybrid"] = DEPS["bm25"] + DEPS["dense"]
+
+
+def require(method: str) -> None:
+    """Check every import a method needs before touching the data.
+
+    Missing packages here almost always mean the wrong environment rather than a
+    broken install: the generation venv carries numpy and a CUDA torch, so the
+    header prints `device=cuda` quite happily and then dies on the first
+    retrieval import — one module per run, three runs to learn the same thing.
+    """
+    import importlib.util
+
+    missing = [pkg for mod, pkg in DEPS[method] if importlib.util.find_spec(mod) is None]
+    if not missing:
+        return
+    sys.exit(
+        f"\nFATAL: --method {method} needs {', '.join(missing)}, not importable here.\n"
+        f"  interpreter: {sys.executable}\n"
+        "  This is the analysis env's job, not .venv-gen (vllm) or LinearRAG's 3.9.\n"
+        "  Fix:  . .venv/bin/activate && pip install -r requirements.txt\n"
+        f"  Or:   pip install {' '.join(missing)}"
+    )
+
 
 def rank_bm25(docs, questions, topk):
     import bm25s
@@ -110,6 +139,7 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
+    require(args.method)
     device = resolve_device(args.device)
     ds = dataio.load(args.dataset)
     if args.limit:
