@@ -27,9 +27,18 @@ OUT = ROOT / "out"
 
 
 def recall_at(retrieved, gold, k):
+    """Fraction of gold PASSAGES covered by the top-k retrieved chunks.
+
+    `gold` is one entry per gold passage, each listing the chunks that would
+    satisfy it — a passage straddling an overlap has two. Counting distinct
+    chunks instead would let one passage score twice.
+    """
     if not gold:
         return float("nan")
-    return len(set(retrieved[:k]) & set(gold)) / len(gold)
+    top = set(retrieved[:k])
+    if not isinstance(gold[0], list):        # legacy flat format
+        return len(top & set(gold)) / len(gold)
+    return sum(1 for opts in gold if top & set(opts)) / len(gold)
 
 
 def main():

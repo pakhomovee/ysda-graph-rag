@@ -61,17 +61,27 @@ def build_index(chunks):
 
 
 def locate(joined, starts, text):
-    """Chunk index containing `text`, or None. Shrinks the probe before giving
-    up: their text went through a tokeniser (`( rfef )`), so a long probe can
-    miss on spacing that a shorter one survives."""
+    """EVERY chunk containing `text`, as a list; empty if none.
+
+    Their chunks overlap — all 1353 consecutive pairs share a boundary, matching
+    the 100-token `chunk_overlap_token_size` in their config — so ~10% of gold
+    passages appear in two chunks. Returning only the first made retrieving the
+    other one score as a miss.
+
+    The probe shrinks before giving up: their text went through a tokeniser
+    (`( rfef )`), so a long probe can miss on spacing a shorter one survives.
+    """
     n = norm(text)
     for width in (90, 60, 40):
         if len(n) < width:
             continue
-        at = joined.find(n[:width])
-        if at != -1:
-            return bisect.bisect_right(starts, at) - 1
-    return None
+        hits, at = [], joined.find(n[:width])
+        while at != -1:
+            hits.append(bisect.bisect_right(starts, at) - 1)
+            at = joined.find(n[:width], at + 1)
+        if hits:
+            return sorted(set(hits))
+    return []
 
 
 def main():
@@ -89,11 +99,11 @@ def main():
     joined, starts = build_index(chunks)
     pid_to_chunk, unmatched = {}, 0
     for pid in sorted({p for q in ds.queries for p in q.gold_pids}):
-        c = locate(joined, starts, ds.corpus[pid]["text"])
-        if c is None:
+        cs = locate(joined, starts, ds.corpus[pid]["text"])
+        if not cs:
             unmatched += 1
         else:
-            pid_to_chunk[pid] = c
+            pid_to_chunk[pid] = cs
 
     by_qid = {q.qid: q for q in ds.queries}
     gold, missing_q = {}, 0
@@ -103,22 +113,26 @@ def main():
         if q is None:
             missing_q += 1
             continue
-        cids = sorted({pid_to_chunk[p] for p in q.gold_pids if p in pid_to_chunk})
-        if cids:
-            gold[e["id"]] = cids
+        # One entry per gold PASSAGE, listing the chunks that would satisfy it.
+        # Flattening would let a passage duplicated across an overlap count twice.
+        opts = [pid_to_chunk[p] for p in q.gold_pids if p in pid_to_chunk]
+        if opts:
+            gold[e["id"]] = opts
 
     dest = args.out or OUT / f"linearrag_gold_{args.dataset}.json"
     dest.write_text(json.dumps(gold, indent=1))
 
-    sizes = [len(v) for v in gold.values()]
+    sizes = [len({c for opts in v for c in opts}) for v in gold.values()]
+    multi = sum(1 for v in gold.values() for opts in v if len(opts) > 1)
     npids = [len(by_qid[match_qid(k, by_qid)].gold_pids) for k in gold]
     print(f"chunks {len(chunks)} | their questions {len(theirq)} | ours {len(ds.queries)}")
     print(f"  gold passages located in a chunk : "
           f"{len(pid_to_chunk)}/{len(pid_to_chunk) + unmatched}")
     print(f"  questions with gold chunks       : {len(gold)}/{len(theirq)}"
           + (f"  ({missing_q} qid misses)" if missing_q else ""))
-    print(f"  gold chunks per question         : mean {sum(sizes)/max(len(sizes),1):.2f}"
+    print(f"  distinct gold chunks/question    : mean {sum(sizes)/max(len(sizes),1):.2f}"
           f"  (from mean {sum(npids)/max(len(npids),1):.2f} gold passages)")
+    print(f"  gold passages in >1 chunk        : {multi}  (chunk overlap; any one counts)")
     print("\nNOTE: several gold passages collapse into one chunk, so recall here is")
     print("      mechanically easier than on our 11,656-passage corpus. Compare")
     print("      vanilla vs sigma_max, never these numbers against baselines.py.")
