@@ -59,8 +59,27 @@ def discover(dataset: str) -> list[Path]:
     return sorted(found, key=lambda p: order.get(p.stem.split("_")[-1], 99))
 
 
-def rank_arm(ds, doc_emb, subq, model_name, batch_size, device, topk):
-    """Rank passages per query by max similarity over {question} u sub-questions."""
+def _topk(scores, topk):
+    kth = min(topk, len(scores) - 1)
+    top = np.argpartition(-scores, kth)[:topk]
+    return [int(p) for p in top[np.argsort(-scores[top])]]
+
+
+def rank_arm(ds, doc_emb, subq, model_name, batch_size, device, topk, fusion="max"):
+    """Rank passages per query by combining {question} u sub-questions.
+
+    `max` is the intervention: sigma_max, the same rule the LinearRAG gate uses.
+    The others exist because "does the gate beat simply decomposing and fusing?"
+    is the first thing anyone will ask, and without them sigma_max is only ever
+    compared against the pooled question — a control it beats trivially.
+
+      max   score[p] = max_j sim(q_j, p)
+      mean  score[p] = mean_j sim(q_j, p)
+      rrf   rank per sub-question independently, fuse by reciprocal rank
+
+    `rrf` is the standard decompose-and-fuse baseline and needs no gate, no graph
+    and no scores on a common scale.
+    """
     texts, spans = [], []
     for q in ds.queries:
         extra = list(subq.get(q.qid, [])) if subq else []
@@ -71,11 +90,20 @@ def rank_arm(ds, doc_emb, subq, model_name, batch_size, device, topk):
     q_emb = baselines.embed(model_name, texts, batch_size, None, device)
 
     ranked = []
-    kth = min(topk, len(doc_emb) - 1)
     for start, end in spans:
-        scores = gate.sigma_max(doc_emb, q_emb[start:end])
-        top = np.argpartition(-scores, kth)[:topk]
-        ranked.append([int(p) for p in top[np.argsort(-scores[top])]])
+        Q = q_emb[start:end]
+        if fusion == "max":
+            ranked.append(_topk(gate.sigma_max(doc_emb, Q), topk))
+        elif fusion == "mean":
+            ranked.append(_topk((doc_emb @ Q.T).mean(axis=1), topk))
+        elif fusion == "rrf":
+            # baselines.rrf so the fusion constant and tie-breaking match the
+            # hybrid baseline exactly rather than being reimplemented here.
+            rows = [np.array(_topk(doc_emb @ Q[j], topk * 3)).reshape(1, -1)
+                    for j in range(Q.shape[0])]
+            ranked.append([int(p) for p in baselines.rrf(rows, topk)[0]])
+        else:
+            sys.exit(f"unknown fusion {fusion!r}")
     return ranked
 
 
@@ -151,6 +179,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--k-report", type=int, nargs="*", default=[2, 5, 10])
+    ap.add_argument("--fusion", nargs="*", default=["max"], choices=["max", "mean", "rrf"],
+                    help="how to combine the query set. max = sigma_max, the method")
     args = ap.parse_args()
 
     baselines.require("dense")
@@ -183,9 +213,14 @@ def main():
             print(f"           {len(ds.queries) - len(covered[name])} fall back to the "
                   "question alone — their delta is exactly zero, so they dilute the "
                   "mean without biasing it")
-        arms[name] = rank_arm(ds, doc_emb, subq, args.model, args.batch_size,
-                              device, args.topk)
-        reports[name] = metrics.evaluate(ds, arms[name], ks=tuple(args.k_report))
+        for fusion in args.fusion:
+            arm = name if fusion == "max" and len(args.fusion) == 1 else f"{name}/{fusion}"
+            covered[arm] = covered[name] if arm != name else covered[name]
+            arms[arm] = rank_arm(ds, doc_emb, subq, args.model, args.batch_size,
+                                 device, args.topk, fusion)
+            reports[arm] = metrics.evaluate(ds, arms[arm], ks=tuple(args.k_report))
+        if len(args.fusion) > 1 or args.fusion[0] != "max":
+            covered.pop(name, None)
 
     print(f"\n{'=' * 72}\nabsolute recall")
     for name, rep in reports.items():

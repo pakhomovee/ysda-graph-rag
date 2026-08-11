@@ -27,6 +27,7 @@ DEPS = {
     "dense": [("faiss", "faiss-cpu"), ("sentence_transformers", "sentence-transformers")],
 }
 DEPS["hybrid"] = DEPS["bm25"] + DEPS["dense"]
+DEPS["rerank"] = DEPS["dense"]
 
 
 def require(method: str) -> None:
@@ -115,6 +116,29 @@ def rank_dense(docs, questions, topk, model_name, batch_size, name, device):
     return idx
 
 
+def rank_rerank(docs, questions, topk, model_name, batch_size, name, device,
+                depth, ce_name):
+    """Dense retrieve `depth`, then reorder with a cross-encoder.
+
+    The strongest cheap non-graph baseline, and the one a graph method most needs
+    to clear: a cross-encoder reads the query and passage jointly instead of
+    comparing two independently-encoded vectors. It reranks rather than retrieves,
+    so recall@k above `depth` is capped by the dense stage.
+    """
+    from sentence_transformers import CrossEncoder
+
+    base = rank_dense(docs, questions, depth, model_name, batch_size, name, device)
+    ce = CrossEncoder(ce_name, device=device, max_length=384)
+
+    ranked = []
+    for question, row in zip(questions, base):
+        scores = ce.predict([(question, docs[p]) for p in row],
+                            batch_size=batch_size, show_progress_bar=False)
+        order = np.argsort(-np.asarray(scores))[:topk]
+        ranked.append([int(row[i]) for i in order])
+    return ranked
+
+
 def rrf(rankings: list[np.ndarray], topk: int, k: int = 60):
     """Reciprocal rank fusion — no score calibration needed between retrievers."""
     fused = []
@@ -130,7 +154,10 @@ def rrf(rankings: list[np.ndarray], topk: int, k: int = 60):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset")
-    ap.add_argument("--method", choices=["bm25", "dense", "hybrid"], default="bm25")
+    ap.add_argument("--method", choices=["bm25", "dense", "hybrid", "rerank"], default="bm25")
+    ap.add_argument("--rerank-depth", type=int, default=50,
+                    help="dense candidates fed to the cross-encoder; caps its recall")
+    ap.add_argument("--rerank-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
     ap.add_argument("--model", default="sentence-transformers/all-mpnet-base-v2")
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=32)
@@ -152,6 +179,9 @@ def main():
     t0 = time.time()
     if args.method == "bm25":
         ranked = rank_bm25(docs, questions, args.topk)
+    elif args.method == "rerank":
+        ranked = rank_rerank(docs, questions, args.topk, args.model, args.batch_size,
+                             ds.name, device, args.rerank_depth, args.rerank_model)
     elif args.method == "dense":
         ranked = rank_dense(docs, questions, args.topk, args.model,
                             args.batch_size, ds.name, device)
