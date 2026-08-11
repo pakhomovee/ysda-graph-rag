@@ -70,10 +70,39 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..bbb13a0 100644
+index 40ee5b0..f3718dd 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
-@@ -519,6 +519,8 @@ def main():
+@@ -110,13 +110,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
+     kwargs.pop("keyword_extraction", None)
+     kwargs.setdefault("temperature", 0.0)
+     kwargs.setdefault("seed", 0)
++    # gpt-oss speaks harmony: chain-of-thought goes to message.reasoning_content
++    # and the answer to message.content. When the analysis channel eats max_tokens
++    # the final channel never arrives and content comes back None, which the
++    # OpenIE parsers then hand to json.loads. "Reasoning: low" keeps analysis
++    # short enough to reach the final channel.
++    if "gpt-oss" in (model or "").lower():
++        system_prompt = ("Reasoning: low\n" + system_prompt) if system_prompt else "Reasoning: low"
++
+     messages = []
+     if system_prompt:
+         messages.append({"role": "system", "content": system_prompt})
+     messages.extend(history_messages)
+     messages.append({"role": "user", "content": prompt})
+     response = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+-    return response.choices[0].message.content
++    msg = response.choices[0].message
++    text = msg.content
++    if not text:
++        # Salvage a truncated reasoning-only reply rather than returning None:
++        # callers expect a string and parse defensively.
++        text = getattr(msg, "reasoning_content", None) or ""
++    return text
+ 
+ async def _openai_embed(texts, model="text-embedding-3-small", api_key=""):
+     client = _get_client(api_key=api_key)
+@@ -519,6 +533,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -82,7 +111,7 @@ index 40ee5b0..bbb13a0 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +531,9 @@ def main():
+@@ -529,6 +545,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -138,6 +167,44 @@ index b8d98b3..e4fc113 100644
 +        zero = np.zeros(np.asarray(self.query_embedding).shape[-1])
          s1 = _cosine_similarity(e1 if e1 is not None else zero, self.query_embedding, mode=self.sim_mode)
          s2 = _cosine_similarity(e2 if e2 is not None else zero, self.query_embedding, mode=self.sim_mode)
+ 
+diff --git a/src/passage_entity/openie.py b/src/passage_entity/openie.py
+index b728039..fa83910 100644
+--- a/src/passage_entity/openie.py
++++ b/src/passage_entity/openie.py
+@@ -52,7 +52,12 @@ def _extract_ner_from_response(response_text: str) -> List[str]:
+     if match is None:
+         return []
+     try:
+-        return eval(match.group())["named_entities"]
++        # eval, not json.loads — their choice, kept so single-quoted model output
++        # still parses. It also means a literal "..." echoed from the prompt
++        # template evaluates to Ellipsis, so the result must be type-checked
++        # before anything downstream tries to serialise it.
++        out = eval(match.group())["named_entities"]
++        return [e for e in out if isinstance(e, str) and e.strip()]
+     except Exception:
+         return []
+ 
+@@ -63,7 +68,9 @@ def _extract_triples_from_response(response_text: str) -> List[List[str]]:
+     if match is None:
+         return []
+     try:
+-        return eval(match.group())["triples"]
++        out = eval(match.group())["triples"]
++        return [list(t) for t in out
++                if isinstance(t, (list, tuple)) and all(isinstance(x, str) for x in t)]
+     except Exception:
+         return []
+ 
+@@ -106,7 +113,7 @@ class OpenIE:
+                 prompt=user_prompt,
+                 system_prompt=system_prompt,
+                 history_messages=history,
+-                max_tokens=2048,
++                max_tokens=4096,
+             )
+         )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
 index e2b2da2..53ed6ec 100644
