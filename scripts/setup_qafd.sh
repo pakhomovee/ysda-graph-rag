@@ -75,9 +75,13 @@ cat <<EOF
     --embedding_model mpnet
 
   Indexing runs OpenIE over the corpus, so budget for ~11.7k LLM calls on
-  MuSiQue. Serve gpt-oss-20b and set llm_base_url to it:
-    vllm serve openai/gpt-oss-20b --port 8000     # from .venv-gen
-    llm_base_url = http://localhost:8000/v1
+  MuSiQue. Point it at your local vLLM server, on whatever port you serve:
+    curl -s http://localhost:<PORT>/v1/models | python3 -m json.tool
+  llm_model must equal the "id" that comes back — with --served-model-name it is
+  not the checkpoint path, and a mismatch fails per request, so you discover it
+  ~11.7k times during indexing rather than once at startup.
+    llm_base_url = http://localhost:<PORT>/v1
+    llm_api_key  = any non-empty string (vLLM ignores it, the client requires it)
 
   Feed it OUR corpus, exactly as with musique_fine, so recall lands in the same
   units as baselines.py, eval_subq.py and LinearRAG:
