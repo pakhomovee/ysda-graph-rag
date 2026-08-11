@@ -144,6 +144,16 @@ def main():
         empty = sum(1 for v in out.values() if not v)
         print("wrote %s  (%d questions, %d with nothing retrieved)" % (dest, len(out), empty))
 
+        # Sidecar, named outside the runs glob so the scorer never sees it.
+        trace = getattr(rag, "entity_trace", None)
+        if trace:
+            d, base = os.path.split(args.out)
+            tdest = os.path.join(d, "entities_%s_%s.json" % (base, name))
+            with open(tdest, "w", encoding="utf-8") as fh:
+                json.dump(trace, fh)
+            bypassed = sum(1 for t in trace if not t["seeded"])
+            print("wrote %s  (%d bypassed graph search entirely)" % (tdest, bypassed))
+
     print("\nnow score both arms in the mbuzai env:")
     print("  python scripts/score_linearrag.py <our-dataset-name> --runs %s_*.json" % args.out)
 
