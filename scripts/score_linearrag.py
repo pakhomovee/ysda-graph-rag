@@ -43,7 +43,17 @@ def main():
 
     gold_path = args.gold or OUT / f"linearrag_gold_{args.dataset}.json"
     gold = json.loads(gold_path.read_text())
-    arms = {p.stem.split("_")[-1]: json.loads(p.read_text()) for p in args.runs}
+    # A glob over out/linearrag_<ds>_*.json also matches this script's own
+    # summary, which then becomes an "arm" holding no question ids and
+    # intersects every arm down to nothing. Take only real run dumps.
+    arms = {}
+    for p in args.runs:
+        data = json.loads(p.read_text())
+        if not (isinstance(data, dict) and data
+                and all(isinstance(v, list) for v in data.values())):
+            print(f"  skipping {p.name}: not a retrieval run dump")
+            continue
+        arms[p.stem.split("_")[-1]] = data
     if args.baseline not in arms:
         sys.exit(f"baseline arm {args.baseline!r} not among {sorted(arms)}")
 
@@ -54,6 +64,10 @@ def main():
     by_qid = {q.qid: q for q in ds.queries}
     qids = [t for t in gold if match_qid(t, by_qid)
             and all(t in a for a in arms.values())]
+    if not qids:
+        sys.exit("no scorable questions: the run dumps and the gold file share no "
+                 "question ids. Regenerate gold with prepare_linearrag_gold.py, or "
+                 "check the runs are for this dataset.")
     print(f"scoring {len(qids)} questions across arms: {', '.join(sorted(arms))}")
     if len(qids) < len(gold):
         print(f"  ({len(gold) - len(qids)} skipped: no gold chunks, or absent from a run)")
@@ -109,7 +123,7 @@ def main():
             row(label, shape[label])
         print("  * = CI excludes zero")
 
-    dest = OUT / f"linearrag_{args.dataset}_scored.json"
+    dest = OUT / f"scored_linearrag_{args.dataset}.json"  # outside the runs glob
     dest.write_text(json.dumps(
         {f"{n}@{k}": sum(v) / len(v) for (n, k), v in per_q.items()}, indent=1))
     print(f"\nwrote {dest}")

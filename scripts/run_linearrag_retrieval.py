@@ -60,6 +60,22 @@ def chunk_id(passage_text):
     return int(head) if head.isdigit() else None
 
 
+def arm_name(subq_path):
+    """Name the arm after its sub-question set.
+
+    Calling every non-vanilla arm "subq" meant a second run silently overwrote
+    the first, so comparing generated against resolved cost a retrieval pass and
+    a lost file. The name also labels the scored table for free.
+    """
+    stem = os.path.splitext(os.path.basename(subq_path))[0]
+    if stem.endswith("_bytext"):
+        stem = stem[: -len("_bytext")]
+    for tag in ("generated", "resolved", "raw"):
+        if stem.endswith(tag):
+            return tag
+    return "subq"
+
+
 def main():
     args = parse_args()
     if args.device:
@@ -102,7 +118,7 @@ def main():
 
     arms = [("vanilla", None)]
     if args.subq_file:
-        arms.append(("subq", load_query_sets(args.subq_file)))
+        arms.append((arm_name(args.subq_file), load_query_sets(args.subq_file)))
 
     for name, query_sets in arms:
         rag.query_sets = query_sets
