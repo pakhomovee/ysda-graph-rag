@@ -70,7 +70,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..375d24b 100644
+index 40ee5b0..a1a2264 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -110,13 +110,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
@@ -143,7 +143,27 @@ index 40ee5b0..375d24b 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -652,6 +679,25 @@ def main():
+@@ -626,6 +653,19 @@ def main():
+     builder = KGBuilder(config, embedding_model, openie)
+ 
+     if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
++        # A cached index built with --max_documents covers a fraction of the
++        # corpus, and retrieval over it still produces a full results table —
++        # a smoke-test graph silently scored as a real run. Refuse instead.
++        _indexed = len(getattr(builder, "chunk_embedding_store", None).hash_ids) \
++            if getattr(builder, "chunk_embedding_store", None) is not None else None
++        if _indexed is not None and _indexed < len(docs):
++            raise SystemExit(
++                f"\nFATAL: cached index covers {_indexed} of {len(docs)} documents.\n"
++                f"  {config.working_dir} was built with --max_documents; retrieval over\n"
++                "  it would score a smoke-test graph as a real run.\n"
++                "  Rebuild with --force_index (OpenIE results are cached per chunk,\n"
++                "  so the documents already extracted are not redone)."
++            )
+         logger.info(f"Using existing KG: {config.working_dir} "
+                      f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
+     else:
+@@ -652,6 +692,25 @@ def main():
          queries=all_queries, num_to_retrieve=config.retrieval_top_k
      )
  
@@ -255,10 +275,10 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..53ed6ec 100644
+index e2b2da2..fa4ebf1 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
-@@ -151,6 +151,34 @@ class PassageEntityRetriever:
+@@ -151,6 +151,51 @@ class PassageEntityRetriever:
      # Query embedding
      # ------------------------------------------------------------------
  
@@ -269,10 +289,27 @@ index e2b2da2..53ed6ec 100644
 +        if not getattr(self.config, "subq_file", None):
 +            return [query]
 +        if not hasattr(self, "_subq_sets"):
-+            from mbuzai.subq_io import load_query_sets
++            try:
++                from mbuzai.subq_io import load_query_sets
++            except ImportError:
++                # The exporter writes to <repo>/out/, so the checkout root is two
++                # levels up from --subq_file. Saves threading PYTHONPATH through
++                # every invocation, and fails with a usable message if it is not.
++                import sys as _sys
++                from pathlib import Path as _Path
++                _root = _Path(self.config.subq_file).resolve().parent.parent
++                if str(_root) not in _sys.path:
++                    _sys.path.insert(0, str(_root))
++                try:
++                    from mbuzai.subq_io import load_query_sets
++                except ImportError as _exc:
++                    raise ImportError(
++                        f"cannot import mbuzai from {_root}; set "
++                        "PYTHONPATH=/path/to/mbuzai-rag"
++                    ) from _exc
 +            self._subq_sets = load_query_sets(self.config.subq_file)
 +            self._subq_hits = 0
-+        from mbuzai.subq_io import lookup
++        from mbuzai.subq_io import lookup   # path fixed up above
 +        extra = lookup(self._subq_sets, query)
 +        if extra:
 +            self._subq_hits += 1
@@ -293,7 +330,7 @@ index e2b2da2..53ed6ec 100644
      def _encode_queries(self, queries: List[str]):
          to_encode = [q for q in queries if q not in self._query_emb_fact]
          if not to_encode:
-@@ -171,15 +199,21 @@ class PassageEntityRetriever:
+@@ -171,15 +216,21 @@ class PassageEntityRetriever:
      # ------------------------------------------------------------------
  
      def _get_fact_scores(self, query: str) -> np.ndarray:
@@ -318,7 +355,7 @@ index e2b2da2..53ed6ec 100644
          return min_max_normalize(scores)
  
      # ------------------------------------------------------------------
-@@ -322,7 +356,12 @@ class PassageEntityRetriever:
+@@ -322,7 +373,12 @@ class PassageEntityRetriever:
                  if i < len(self.passage_embeddings):
                      self._node_emb_dict[nk] = self.passage_embeddings[i]
  
