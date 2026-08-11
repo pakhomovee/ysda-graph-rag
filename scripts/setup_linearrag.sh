@@ -47,18 +47,33 @@ grep -q "question_emb.reshape(1, -1)" "$SUB/src/LinearRAG.py" 2>/dev/null \
 cat <<EOF
 
 ==> next, by hand
-  Python 3.9 env, then inside $SUB:
-    pip install -r requirements.txt
+  A Python 3.9 env. spacy-transformers is missing from their requirements even
+  though en_core_web_trf needs it:
+    uv venv --python 3.9 .venv-linear
+    . .venv-linear/bin/activate
+    uv pip install -r $SUB/requirements.txt
+    uv pip install spacy-transformers
     python -m spacy download en_core_web_trf
+    deactivate
 
-  Their dataset bundle (multi-GB, git-lfs — not a submodule):
-    git clone https://huggingface.co/datasets/Zly0523/linear-rag
-    cp -r linear-rag/* $SUB/dataset/
-  Note their MuSiQue sibling is named 2wikimultihop, not 2wikimultihopqa.
+  Their dataset bundle — git-lfs, so not a submodule, but small. Only the two
+  datasets we use, ~11 MB:
+    git clone https://huggingface.co/datasets/Zly0523/linear-rag /tmp/linear-rag
+    cp -r /tmp/linear-rag/musique /tmp/linear-rag/2wikimultihop $SUB/dataset/
+  Their 2Wiki is named 2wikimultihop, ours is 2wikimultihopqa.
 
-  So mbuzai.gate and mbuzai.subq_io are importable on 3.9:
+  Then smoke-test on 20 questions before committing to a full run:
+    LIMIT=20 PY39=.venv-linear/bin/python bash scripts/run_linear_musique.sh
+    PY39=.venv-linear/bin/python bash scripts/run_linear_musique.sh
+
+  The run scripts export PYTHONPATH themselves. Only exporting it by hand
+  matters if you drive run_linearrag_retrieval.py directly:
     export PYTHONPATH=$ROOT:\$PYTHONPATH
 
-  Reproduce their vanilla numbers BEFORE running the sigma_max arm. The patch is
-  inert without --subq_file (bitwise verified), so any gap there is the harness.
+  On "reproducing their numbers": you cannot match their published table. They
+  report QA EM/F1 through an LLM, and their bundle ships no gold passages, so our
+  recall uses our own gold mapped onto their chunks. What the vanilla arm gives
+  you is a baseline on identical footing with the sigma_max arm — which is the
+  only comparison the claim needs. Sanity-check it is far above chance, then read
+  the paired delta.
 EOF

@@ -15,6 +15,7 @@ OURS=2wikimultihopqa   # our dataset name (data/, out/)
 THEIRS=2wikimultihop  # their bundle directory name — note: no "qa" suffix
 DEVICE=${DEVICE:-3}
 TOPK=${TOPK:-10}
+LIMIT=${LIMIT:-}       # set for a smoke run, e.g. LIMIT=20
 PY=${PY:-python3}     # mbuzai env
 PY39=${PY39:-python3} # LinearRAG env
 EMB=${EMB:-sentence-transformers/all-mpnet-base-v2}
@@ -53,6 +54,7 @@ echo "==> retrieval, both arms off one index (LinearRAG env, from its checkout)"
     --retrieval_top_k "$TOPK" \
     --embedding_model "$EMB" \
     --subq_file "$BYTEXT" \
+    ${LIMIT:+--limit "$LIMIT"} \
     --out "$STEM" )
 
 echo "==> score"
