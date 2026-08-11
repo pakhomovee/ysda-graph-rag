@@ -32,8 +32,12 @@ grep -q "sigma_max(sentence_embeddings" "$SUB/src/LinearRAG.py" \
     || { echo "LinearRAG is not patched — run: bash scripts/setup_linearrag.sh" >&2; exit 1; }
 [ -f "$BUNDLE/chunks.json" ] || { cat >&2 <<EOF
 missing $BUNDLE/chunks.json
-  git clone https://huggingface.co/datasets/Zly0523/linear-rag
-  cp -r linear-rag/* $SUB/dataset/
+  Fetch it directly — a git clone without git-lfs installed yields pointer
+  stubs, not JSON, and the failure surfaces much later as a parse error:
+    B=https://huggingface.co/datasets/Zly0523/linear-rag/resolve/main
+    mkdir -p $SUB/dataset/$THEIRS
+    curl -L -o $SUB/dataset/$THEIRS/chunks.json    \$B/$THEIRS/chunks.json
+    curl -L -o $SUB/dataset/$THEIRS/questions.json \$B/$THEIRS/questions.json
 EOF
 exit 1; }
 [ -f "$SUBQ" ] || { echo "missing $SUBQ — run scripts/gen_subq.py $OURS first" >&2; exit 1; }

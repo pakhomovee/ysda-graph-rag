@@ -56,10 +56,14 @@ cat <<EOF
     python -m spacy download en_core_web_trf
     deactivate
 
-  Their dataset bundle — git-lfs, so not a submodule, but small. Only the two
-  datasets we use, ~11 MB:
-    git clone https://huggingface.co/datasets/Zly0523/linear-rag /tmp/linear-rag
-    cp -r /tmp/linear-rag/musique /tmp/linear-rag/2wikimultihop $SUB/dataset/
+  Their dataset bundle, ~11 MB for the two datasets we use. Fetch the files
+  directly: cloning the HF repo without git-lfs gives pointer stubs, not JSON.
+    B=https://huggingface.co/datasets/Zly0523/linear-rag/resolve/main
+    for d in musique 2wikimultihop; do
+      mkdir -p $SUB/dataset/\$d
+      curl -L -o $SUB/dataset/\$d/chunks.json    \$B/\$d/chunks.json
+      curl -L -o $SUB/dataset/\$d/questions.json \$B/\$d/questions.json
+    done
   Their 2Wiki is named 2wikimultihop, ours is 2wikimultihopqa.
 
   Then smoke-test on 20 questions before committing to a full run:
