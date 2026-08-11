@@ -23,6 +23,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+if sys.version_info < (3, 10):  # dataio/metrics use PEP 604 annotations
+    sys.exit(
+        f"\nFATAL: this script needs the mbuzai env (Python 3.10+), got "
+        f"{sys.version.split()[0]}\n  interpreter: {sys.executable}\n"
+        "  LinearRAG's .venv-linear is 3.9 and only run_linearrag_retrieval.py runs there.\n"
+        "  Fix:  deactivate   (or point at the mbuzai interpreter directly)"
+    )
+
 from mbuzai import dataio  # noqa: E402
 from mbuzai.subq_io import normalize_question  # noqa: E402
 
