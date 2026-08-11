@@ -2,3 +2,7 @@
 	path = third_party/LinearRAG
 	url = https://github.com/DEEP-PolyU/LinearRAG
 	ignore = dirty
+[submodule "third_party/QAFD-RAG"]
+	path = third_party/QAFD-RAG
+	url = https://github.com/Tarzanagh/QAFD-RAG
+	ignore = dirty

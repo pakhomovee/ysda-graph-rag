@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Bring up the patched QAFD-RAG working copy.
+#
+# Same shape as setup_linearrag.sh: the submodule is pinned to the commit the
+# patch was written against, referenced rather than vendored, and idempotent.
+#
+#     bash scripts/setup_qafd.sh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SUB="$ROOT/third_party/QAFD-RAG"
+PATCH="$ROOT/patches/qafd_sigma_max.patch"
+
+echo "==> submodule"
+git -C "$ROOT" submodule update --init --recursive third_party/QAFD-RAG
+echo "    at $(git -C "$SUB" rev-parse --short HEAD)"
+
+echo "==> patch"
+if git -C "$SUB" apply --reverse --check "$PATCH" 2>/dev/null; then
+    echo "    already applied — nothing to do"
+elif git -C "$SUB" apply --check "$PATCH" 2>/dev/null; then
+    git -C "$SUB" apply "$PATCH"
+    echo "    applied $(basename "$PATCH")"
+else
+    FILES=$(git -C "$SUB" apply --numstat "$PATCH" | awk '{print $3}')
+    echo "    patch is out of date in the working tree; resetting and reapplying:"
+    echo "$FILES" | sed 's/^/      /'
+    # shellcheck disable=SC2086
+    git -C "$SUB" checkout -- $FILES
+    if git -C "$SUB" apply "$PATCH"; then
+        echo "    reapplied $(basename "$PATCH")"
+    else
+        echo "    FATAL: patch does not apply even to a clean tree." >&2
+        git -C "$SUB" log -1 --format='      at %h %s' >&2
+        exit 1
+    fi
+fi
+
+echo "==> sanity"
+grep -q "sigma_max" "$SUB/src/passage_entity/graph_adapter.py" && echo "    _cosine_similarity takes a query set"
+grep -q "subq_scope" "$SUB/src/passage_entity/config.py"       && echo "    config exposes subq_file / subq_scope"
+grep -q "_query_matrix" "$SUB/src/passage_entity/retriever.py" && echo "    retriever builds the query set"
+
+cat <<EOF
+
+==> what the patch does
+  Every query-aware similarity in the passage-entity pipeline funnels through
+  one function, _cosine_similarity(node_emb, query_embedding). It now accepts a
+  (m, d) query set and returns the max, so the intervention reaches all of:
+    * edge weighting        w * sim(u,q) * sim(v,q)   <- the flow diffusion itself
+    * sink / warm-start node similarities
+    * the post-hoc lambda reweighting
+  A 1-D query embedding is bit-for-bit unchanged, so no --subq_file means the
+  original algorithm.
+
+  subq_scope separates the two places the query is used:
+    edges  (default)  modulate diffusion edge weights only
+    seeds             sigma_max on fact scores, which drive node seeding
+    both
+  Keep them separable. In LinearRAG the gate improved the activation frontier
+  while seeding stayed pooled, and the two effects could not be told apart
+  afterwards.
+
+==> next, by hand
+  Python 3.10 env:
+    uv venv --python 3.10 .venv-qafd
+    . .venv-qafd/bin/activate
+    uv pip install -r $SUB/requirements.txt
+
+  Their defaults are heavy and NOT comparable to the rest of this repo:
+    embedding_model_key = "nvidia-nv-embed-v2"   (a 7B embedding model)
+    llm_model           = "gpt-4o-mini"          (OpenIE over every passage)
+  For a like-for-like row, point the embedding at all-mpnet-base-v2 if their
+  registry allows it, and the LLM at your local vLLM server. If the encoder
+  cannot be matched, say so in the writeup rather than comparing across
+  encoders — the encoder is worth more than the intervention.
+
+  Indexing runs OpenIE over the corpus, so budget for ~11.7k LLM calls on
+  MuSiQue. Serve gpt-oss-20b and set llm_base_url to it:
+    vllm serve openai/gpt-oss-20b --port 8000     # from .venv-gen
+    llm_base_url = http://localhost:8000/v1
+
+  Feed it OUR corpus, exactly as with musique_fine, so recall lands in the same
+  units as baselines.py, eval_subq.py and LinearRAG:
+    python scripts/export_corpus_for_linearrag.py musique --name musique_fine
+  and the sub-questions re-keyed by question text:
+    python scripts/export_subq_for_linearrag.py musique --subq out/subq_musique_generated.json
+EOF

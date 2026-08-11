@@ -1,0 +1,125 @@
+diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
+index d015a39..3ffd772 100644
+--- a/src/passage_entity/config.py
++++ b/src/passage_entity/config.py
+@@ -57,6 +57,10 @@ class PassageEntityConfig:
+     qafd_random_seed: int = 42
+ 
+     # ── Query-aware enhancements (all default = original behaviour) ────────
++    # sigma_max arm. None everywhere reproduces the original pooled query exactly.
++    subq_file: Optional[str] = None  # *_bytext.json, keyed by normalised question
++    subq_scope: str = "edges"        # "edges" | "seeds" | "both"
++
+     sim_mode: str = "normalized"     # Similarity contrast: "normalized", "relu", "relu_sq"
+     qa_sink_gamma: float = 0.0       # Query-aware sink capacity (0=off)
+     qa_warm_delta: float = 0.0       # Query-aware seed bias (0=off)
+diff --git a/src/passage_entity/graph_adapter.py b/src/passage_entity/graph_adapter.py
+index b8d98b3..e4fc113 100644
+--- a/src/passage_entity/graph_adapter.py
++++ b/src/passage_entity/graph_adapter.py
+@@ -59,6 +59,16 @@ def _cosine_similarity(vec1: np.ndarray, vec2: np.ndarray, mode: str = "normaliz
+     """
+     if len(vec1) == 0 or len(vec2) == 0:
+         return 0.0
++
++    # sigma_max: when the query side is a (m, d) query set rather than a single
++    # vector, score against every member and keep the best. Every query-aware
++    # site in this file funnels through here — edge weighting, the sink/warm
++    # node similarities, and the post-hoc lambda reweighting — so one change
++    # covers all of them, and a 1-D query embedding behaves exactly as before.
++    q = np.asarray(vec2)
++    if q.ndim == 2:
++        return max(_cosine_similarity(vec1, row, mode=mode) for row in q)
++
+     dot = np.dot(vec1, vec2)
+     m1 = np.linalg.norm(vec1)
+     m2 = np.linalg.norm(vec2)
+@@ -248,7 +258,9 @@ class IGraphQAFD:
+             self._edge_weight_cache[key] = w
+             return w
+ 
+-        zero = np.zeros_like(self.query_embedding)
++        # shape[-1], not zeros_like: the query side may be a (m, d) query set,
++        # and this stands in for a missing NODE embedding.
++        zero = np.zeros(np.asarray(self.query_embedding).shape[-1])
+         s1 = _cosine_similarity(e1 if e1 is not None else zero, self.query_embedding, mode=self.sim_mode)
+         s2 = _cosine_similarity(e2 if e2 is not None else zero, self.query_embedding, mode=self.sim_mode)
+ 
+diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
+index e2b2da2..53ed6ec 100644
+--- a/src/passage_entity/retriever.py
++++ b/src/passage_entity/retriever.py
+@@ -151,6 +151,34 @@ class PassageEntityRetriever:
+     # Query embedding
+     # ------------------------------------------------------------------
+ 
++    def _query_set(self, query: str) -> List[str]:
++        """[question] + its sub-questions. Row 0 is always the original question,
++        so sigma_max >= sigma_q elementwise and the arm cannot score below the
++        pooled baseline by construction."""
++        if not getattr(self.config, "subq_file", None):
++            return [query]
++        if not hasattr(self, "_subq_sets"):
++            from mbuzai.subq_io import load_query_sets
++            self._subq_sets = load_query_sets(self.config.subq_file)
++            self._subq_hits = 0
++        from mbuzai.subq_io import lookup
++        extra = lookup(self._subq_sets, query)
++        if extra:
++            self._subq_hits += 1
++            return [query] + list(extra)
++        return [query]
++
++    def _query_matrix(self, query: str, kind: str = "fact") -> np.ndarray:
++        """(m, d) stack for the query set, or the plain (d,) vector when there
++        are no sub-questions — which keeps the original code path bit for bit."""
++        cache = self._query_emb_fact if kind == "fact" else self._query_emb_pass
++        qs = self._query_set(query)
++        if len(qs) == 1:
++            return cache.get(query)
++        self._encode_queries(qs)
++        rows = [cache[q] for q in qs if q in cache]
++        return np.vstack(rows) if len(rows) > 1 else (rows[0] if rows else cache.get(query))
++
+     def _encode_queries(self, queries: List[str]):
+         to_encode = [q for q in queries if q not in self._query_emb_fact]
+         if not to_encode:
+@@ -171,15 +199,21 @@ class PassageEntityRetriever:
+     # ------------------------------------------------------------------
+ 
+     def _get_fact_scores(self, query: str) -> np.ndarray:
+-        qe = self._query_emb_fact.get(query)
++        # Seeding is deliberately a separate scope from edge weighting: in
++        # LinearRAG the gate improved the frontier while seeding stayed pooled,
++        # and the two effects were impossible to separate afterwards.
++        if getattr(self.config, "subq_scope", "edges") in ("seeds", "both"):
++            qe = self._query_matrix(query, "fact")
++        else:
++            qe = self._query_emb_fact.get(query)
+         if qe is None:
+             qe = self.embedding_model.batch_encode(
+                 query, instruction=get_query_instruction("query_to_fact"), norm=True
+             )
+         if len(self.fact_embeddings) == 0:
+             return np.array([])
+-        scores = np.dot(self.fact_embeddings, qe.T)
+-        scores = np.squeeze(scores) if scores.ndim == 2 else scores
++        scores = np.dot(self.fact_embeddings, np.atleast_2d(qe).T)   # (n_facts, m)
++        scores = scores.max(axis=1) if scores.ndim == 2 else scores  # sigma_max
+         return min_max_normalize(scores)
+ 
+     # ------------------------------------------------------------------
+@@ -322,7 +356,12 @@ class PassageEntityRetriever:
+                 if i < len(self.passage_embeddings):
+                     self._node_emb_dict[nk] = self.passage_embeddings[i]
+ 
+-        query_emb = self._query_emb_fact.get(query)
++        # The intervention: edge weights are modulated by similarity to the query,
++        # so give that step the whole query set instead of the pooled question.
++        if getattr(self.config, "subq_scope", "edges") in ("edges", "both"):
++            query_emb = self._query_matrix(query, "fact")
++        else:
++            query_emb = self._query_emb_fact.get(query)
+ 
+         # --- Run QAFD ---
+         qafd_start = time.time()
