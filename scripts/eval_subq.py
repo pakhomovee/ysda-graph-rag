@@ -119,7 +119,7 @@ def per_query_recall(ds, ranked, k):
     return [_recall(r, q.gold_pids, k) for r, q in zip(ranked, ds.queries)]
 
 
-def delta_table(ds, base, arms, covered, k):
+def delta_table(ds, base, arms, covered, k, base_name="pooled sigma_q"):
     """Paired deltas vs the pooled-query baseline, split three ways.
 
     Paired because the arms see identical questions: the per-question difference
@@ -153,7 +153,7 @@ def delta_table(ds, base, arms, covered, k):
         depth.setdefault(f"{q.n_hops}hop-{'join' if q.is_join else 'chain'}", []).append(i)
         shape.setdefault(q.shape or "?", []).append(i)
 
-    lines = [f"\ndelta vs pooled sigma_q, recall@{k}  (paired bootstrap 95% CI)"]
+    lines = [f"\ndelta vs {base_name}, recall@{k}  (paired bootstrap 95% CI)"]
     lines.append("  " + " " * 25 + "".join(f"{name:>25}" for name in arms))
 
     def section(buckets, title=None):
@@ -189,6 +189,10 @@ def main():
     ap.add_argument("--k-report", type=int, nargs="*", default=[2, 5, 10])
     ap.add_argument("--fusion", nargs="*", default=["max"], choices=["max", "mean", "rrf"],
                     help="how to combine the query set. max = sigma_max, the method")
+    ap.add_argument("--baseline", default="pooled",
+                    help="arm the deltas are measured against. Use e.g. generated/rrf to "
+                         "test the gate against decompose-and-fuse as a PAIRED comparison, "
+                         "rather than eyeballing two CIs that both reference pooled.")
     args = ap.parse_args()
 
     baselines.require("dense")
@@ -236,8 +240,16 @@ def main():
                           for k, v in rep["overall"].items())
         print(f"  {name:<12} {cells}")
 
+    base_name = "pooled sigma_q"
+    if args.baseline != "pooled":
+        if args.baseline not in arms:
+            sys.exit(f"--baseline {args.baseline!r} not among {sorted(arms)}")
+        base = arms.pop(args.baseline)
+        covered.pop(args.baseline, None)
+        base_name = args.baseline
+
     for k in args.k_report:
-        print(delta_table(ds, base, arms, covered, k))
+        print(delta_table(ds, base, arms, covered, k, base_name))
 
     dest = OUT / f"{ds.name}_subq_eval.json"
     dest.write_text(json.dumps(reports, indent=1))
