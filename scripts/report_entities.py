@@ -65,9 +65,12 @@ def main():
         n = len(trace)
         tiers = Counter()
         per_q_total, bypassed, in_gold, in_gold_deep = [], 0, 0, 0
+        used_sentences = []
         for t in trace:
             if not t["seeded"]:
                 bypassed += 1
+            if t.get("used_sentences"):
+                used_sentences.append(t["used_sentences"])
             ents = t["entities"]
             per_q_total.append(len(ents))
             g = gold_text.get(t["id"], "")
@@ -85,7 +88,11 @@ def main():
               "<- NER found no entity; pure DPR, both arms identical")
         print(f"  activated entities/question: mean "
               f"{sum(per_q_total)/max(n,1):.1f}  max {max(per_q_total, default=0)}")
-        print("  tier distribution        :")
+        if used_sentences:
+            print(f"  sentences consumed/question: mean "
+                  f"{sum(used_sentences)/len(used_sentences):.1f}"
+                  "   <- global dedup pool; fewer means a narrower search")
+        print("  tier distribution (FIRST arrival, i.e. distance from seeds):")
         for tier in sorted(tiers):
             label = {1: "seed", 2: "1 hop", 3: "2 hops"}.get(tier, f"{tier-1} hops")
             print(f"      tier {tier} ({label:<6}) {tiers[tier]:>7}  {tiers[tier]/max(total,1):>6.1%}")

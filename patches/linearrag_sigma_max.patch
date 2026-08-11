@@ -1,5 +1,5 @@
 diff --git a/src/LinearRAG.py b/src/LinearRAG.py
-index 53aca01..b6973af 100644
+index 53aca01..6743350 100644
 --- a/src/LinearRAG.py
 +++ b/src/LinearRAG.py
 @@ -12,6 +12,16 @@ import igraph as ig
@@ -48,7 +48,7 @@ index 53aca01..b6973af 100644
 +                query_embeddings = self.config.embedding_model.encode([question] + list(subqs),normalize_embeddings=True,show_progress_bar=False,batch_size=self.config.batch_size)
 +            else:
 +                query_embeddings = question_embedding.reshape(1, -1)
-+            self._last_actived = {}
++            self._last_actived, self._last_first_tier, self._last_used_sentences = {}, {}, 0
              seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores = self.get_seed_entities(question)
              if len(seed_entities) != 0:
 -                sorted_passage_hash_ids,sorted_passage_scores = self.graph_search_with_seed_entities(question,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores)
@@ -56,7 +56,7 @@ index 53aca01..b6973af 100644
                  final_passage_hash_ids = sorted_passage_hash_ids[:self.config.retrieval_top_k]
                  final_passage_scores = sorted_passage_scores[:self.config.retrieval_top_k]
                  final_passages = [self.passage_embedding_store.hash_id_to_text[passage_hash_id] for passage_hash_id in final_passage_hash_ids]
-@@ -126,6 +152,16 @@ class LinearRAG:
+@@ -126,6 +152,20 @@ class LinearRAG:
                  "gold_answer": question_info["answer"]
              }
              retrieval_results.append(result)
@@ -64,16 +64,20 @@ index 53aca01..b6973af 100644
 +            # What did the entity mining actually reach? Recall@k cannot answer
 +            # that, and the whole claim is about activating distant entities.
 +            trace = {"id": question_info.get("id"), "seeded": bool(seed_entities),
-+                     "n_seeds": len(seed_entities), "entities": []}
++                     "n_seeds": len(seed_entities),
++                     "used_sentences": int(getattr(self, "_last_used_sentences", 0)),
++                     "entities": []}
 +            if seed_entities:
-+                for h, (_idx, score, tier) in list(self._last_actived.items())[:300]:
++                first = getattr(self, "_last_first_tier", {})
++                for h, (_idx, score, tier) in list(self._last_actived.items())[:2000]:
 +                    trace["entities"].append(
-+                        [self.entity_embedding_store.hash_id_to_text[h], int(tier), float(score)])
++                        [self.entity_embedding_store.hash_id_to_text[h],
++                         int(first.get(h, tier)), float(score)])
 +            self.entity_trace.append(trace)
          return retrieval_results
      
      def _precompute_sparse_matrices(self):
-@@ -183,11 +219,12 @@ class LinearRAG:
+@@ -183,11 +223,12 @@ class LinearRAG:
                  (num_sentences, num_entities), device=self.device
              )
              
@@ -89,16 +93,26 @@ index 53aca01..b6973af 100644
          passage_weights = self.calculate_passage_scores(question, question_embedding, actived_entities)
          node_weights = entity_weights + passage_weights
          ppr_sorted_passage_indices,ppr_sorted_passage_scores = self.run_ppr(node_weights)
-@@ -215,7 +252,7 @@ class LinearRAG:
+@@ -215,11 +256,17 @@ class LinearRAG:
          
          return sorted_passage_hash_ids, sorted_passage_scores.tolist()
  
 -    def calculate_entity_scores(self,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores):
 +    def calculate_entity_scores(self,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores,query_embeddings=None):
          actived_entities = {}
++        # actived_entities.update() overwrites an entity's tier when it is reached
++        # again, so its tier is the LAST one, not the first. Distance from the
++        # seeds is the quantity of interest, so record first arrival separately.
++        # Bookkeeping only: nothing here feeds the algorithm.
++        first_tier = {}
          entity_weights = np.zeros(len(self.graph.vs["name"]))
          for seed_entity_idx,seed_entity,seed_entity_hash_id,seed_entity_score in zip(seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores):
-@@ -235,8 +272,8 @@ class LinearRAG:
+             actived_entities[seed_entity_hash_id] = (seed_entity_idx, seed_entity_score, 1)
++            first_tier.setdefault(seed_entity_hash_id, 1)
+             seed_entity_node_idx = self.node_name_to_vertex_idx[seed_entity_hash_id]
+             entity_weights[seed_entity_node_idx] = seed_entity_score    
+         used_sentence_hash_ids = set()
+@@ -235,8 +282,8 @@ class LinearRAG:
                      continue
                  sentence_indices = [self.sentence_embedding_store.hash_id_to_idx[sid] for sid in sentence_hash_ids]
                  sentence_embeddings = self.sentence_embeddings[sentence_indices]
@@ -109,8 +123,16 @@ index 53aca01..b6973af 100644
                  top_sentence_indices = np.argsort(sentence_similarities)[::-1][:self.config.top_k_sentence]
                  for top_sentence_index in top_sentence_indices:
                      top_sentence_hash_id = sentence_hash_ids[top_sentence_index]
-@@ -255,7 +292,7 @@ class LinearRAG:
+@@ -250,12 +297,15 @@ class LinearRAG:
+                         next_enitity_node_idx = self.node_name_to_vertex_idx[next_entity_hash_id]
+                         entity_weights[next_enitity_node_idx] += next_entity_score
+                         new_entities[next_entity_hash_id] = (next_enitity_node_idx, next_entity_score, iteration+1)
++                        first_tier.setdefault(next_entity_hash_id, iteration+1)
+             actived_entities.update(new_entities)
+             current_entities = new_entities.copy()
              iteration += 1
++        self._last_first_tier = first_tier
++        self._last_used_sentences = len(used_sentence_hash_ids)
          return entity_weights, actived_entities
  
 -    def calculate_entity_scores_vectorized(self,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores):
@@ -118,7 +140,7 @@ index 53aca01..b6973af 100644
          """
          GPU-accelerated vectorized version using PyTorch sparse tensors.
          Uses sparse representation for both matrices and entity score vectors for maximum efficiency.
-@@ -270,8 +307,8 @@ class LinearRAG:
+@@ -270,8 +320,8 @@ class LinearRAG:
          num_sentences = len(self.sentence_hash_ids)
          
          # Compute all sentence similarities with the question at once
