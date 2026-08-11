@@ -70,7 +70,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..a1a2264 100644
+index 40ee5b0..97a682f 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -110,13 +110,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
@@ -163,7 +163,7 @@ index 40ee5b0..a1a2264 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -652,6 +692,25 @@ def main():
+@@ -652,6 +692,35 @@ def main():
          queries=all_queries, num_to_retrieve=config.retrieval_top_k
      )
  
@@ -179,7 +179,17 @@ index 40ee5b0..a1a2264 100644
 +        _qid = str(_s.get("id") or _s.get("_id") or _s["question"])
 +        _dump[_qid] = [_doc_to_idx.get(_d, -1) for _d in _r.docs]
 +    os.makedirs(config.working_dir, exist_ok=True)
-+    _arm = "vanilla" if not getattr(config, "subq_file", None) else config.subq_scope
++    # Name the arm after scope AND query set. Using the scope alone meant a
++    # second run with a different --subq_file silently overwrote the first, so a
++    # shuffled control would destroy the result it was meant to check.
++    _arm = "vanilla"
++    if getattr(config, "subq_file", None):
++        _stem = os.path.splitext(os.path.basename(config.subq_file))[0]
++        if _stem.endswith("_bytext"):
++            _stem = _stem[: -len("_bytext")]
++        _tag = next((t for t in ("generated", "resolved", "raw", "shuffled")
++                     if _stem.endswith(t)), "subq")
++        _arm = "%s-%s" % (config.subq_scope, _tag)
 +    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
 +    with open(_dump_path, "w") as _f:
 +        json.dump(_dump, _f)
