@@ -86,6 +86,16 @@ def main():
                  "question ids. Regenerate gold with prepare_linearrag_gold.py, or "
                  "check the runs are for this dataset.")
     print(f"scoring {len(qids)} questions across arms: {', '.join(sorted(arms))}")
+
+    # recall@k over a list shorter than k is recall@len(list). Reranked arms are
+    # truncated to their topk, so scoring them at a larger k silently compares a
+    # 10-item list against 50-item ones and reports a huge spurious deficit.
+    for name, run in sorted(arms.items()):
+        depth = max((len(v) for v in run.values()), default=0)
+        bad = [k for k in args.ks if k > depth]
+        if bad:
+            print(f"  WARNING {name}: depth {depth}; recall@{bad} is really recall@{depth}. "
+                  "Do not compare it against deeper arms.")
     if len(qids) < len(gold):
         print(f"  ({len(gold) - len(qids)} skipped: no gold chunks, or absent from a run)")
 
