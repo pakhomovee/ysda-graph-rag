@@ -52,8 +52,13 @@ cat <<EOF
     uv venv --python 3.9 .venv-linear
     . .venv-linear/bin/activate
     uv pip install -r $SUB/requirements.txt
-    uv pip install spacy-transformers
-    python -m spacy download en_core_web_trf
+  'python -m spacy download' needs pip, which uv venvs do not ship. Install the
+  model wheel directly instead — 3.6.1 to match their pinned spacy, and
+  spacy-transformers <1.3 because 1.3+ requires spacy 3.7:
+    M=https://github.com/explosion/spacy-models/releases/download
+    uv pip install "spacy-transformers<1.3" \
+      \$M/en_core_web_trf-3.6.1/en_core_web_trf-3.6.1-py3-none-any.whl
+    python -c "import spacy; spacy.load('en_core_web_trf'); print('spacy ok')"
     deactivate
 
   Their dataset bundle, ~11 MB for the two datasets we use. Fetch the files
