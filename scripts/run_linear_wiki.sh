@@ -20,6 +20,11 @@ PY=${PY:-python3}     # mbuzai env
 PY39=${PY39:-python3} # LinearRAG env
 EMB=${EMB:-sentence-transformers/all-mpnet-base-v2}
 
+# Retrieval runs after a cd into the submodule, so a relative interpreter path
+# (PY39=.venv-linear/bin/python) would resolve against the wrong directory.
+# Absolutise anything path-like; leave bare command names to PATH.
+case "$PY39" in */*) PY39="$(cd "$(dirname "$PY39")" && pwd)/$(basename "$PY39")" ;; esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/third_party/LinearRAG"
 BUNDLE="$SUB/dataset/$THEIRS"
@@ -60,6 +65,9 @@ echo "==> retrieval, both arms off one index (LinearRAG env, from its checkout)"
     --subq_file "$BYTEXT" \
     ${LIMIT:+--limit "$LIMIT"} \
     --out "$STEM" )
+
+compgen -G "${STEM}_*.json" >/dev/null \
+    || { echo "retrieval wrote no run files — see the error above" >&2; exit 1; }
 
 echo "==> score"
 $PY "$ROOT/scripts/score_linearrag.py" $OURS --runs "${STEM}"_*.json
