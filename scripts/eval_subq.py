@@ -63,7 +63,10 @@ def discover(dataset: str) -> list[Path]:
     """Every sub-question set on disk for this dataset, oracle-ish ones first."""
     order = {"raw": 0, "resolved": 1, "generated": 2}
     found = sorted(OUT.glob(f"subq_{dataset}_*.json"))
-    found = [p for p in found if not p.name.endswith("_raw.jsonl")]
+    # *_bytext.json is the LinearRAG export, keyed by normalised question text
+    # rather than qid, so every lookup here misses and the arm silently becomes a
+    # duplicate of pooled — six identical all-zero columns in the table.
+    found = [p for p in found if not p.name.endswith(("_raw.jsonl", "_bytext.json"))]
     return sorted(found, key=lambda p: order.get(p.stem.split("_")[-1], 99))
 
 
