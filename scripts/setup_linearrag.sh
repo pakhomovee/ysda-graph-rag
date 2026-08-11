@@ -37,8 +37,16 @@ else
     FILES=$(git -C "$SUB" apply --numstat "$PATCH" | awk '{print $3}')
     echo "    patch is out of date in the working tree; resetting and reapplying:"
     echo "$FILES" | sed 's/^/      /'
-    # shellcheck disable=SC2086
-    git -C "$SUB" checkout -- $FILES
+    # A patch that ADDS a file lists a path git has never tracked, and
+    # 'git checkout --' on one is a fatal pathspec error. Reset what is tracked,
+    # delete what is not.
+    for f in $FILES; do
+        if git -C "$SUB" ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+            git -C "$SUB" checkout -- "$f"
+        else
+            rm -f "$SUB/$f"
+        fi
+    done
     if git -C "$SUB" apply "$PATCH"; then
         echo "    reapplied $(basename "$PATCH")"
     else
