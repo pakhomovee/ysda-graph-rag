@@ -70,7 +70,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..f3718dd 100644
+index 40ee5b0..375d24b 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -110,13 +110,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
@@ -102,7 +102,29 @@ index 40ee5b0..f3718dd 100644
  
  async def _openai_embed(texts, model="text-embedding-3-small", api_key=""):
      client = _get_client(api_key=api_key)
-@@ -519,6 +533,8 @@ def main():
+@@ -426,6 +440,12 @@ def main():
+                         help="Only run retrieval, skip QA step")
+ 
+     # Query-aware enhancements (all default = original behaviour)
++    parser.add_argument("--subq_file", type=str, default=None,
++                        help="exported *_bytext.json; enables the sigma_max arm")
++    parser.add_argument("--subq_scope", type=str, default="edges",
++                        choices=["edges", "seeds", "both"],
++                        help="where the query set is used: diffusion edge weights, "
++                             "fact scores that drive seeding, or both")
+     parser.add_argument("--sim_mode", type=str, default="normalized",
+                         choices=["normalized", "relu", "relu_sq"],
+                         help="Similarity contrast function (default=normalized)")
+@@ -459,6 +479,8 @@ def main():
+     # ----------------------------------------------------------------
+     config = PassageEntityConfig(
+         llm_model=args.llm_model,
++        subq_file=args.subq_file,
++        subq_scope=args.subq_scope,
+         llm_base_url=args.llm_base_url,
+         llm_api_key=args.llm_api_key,
+         embedding_model_key=args.embedding_model,
+@@ -519,6 +541,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -111,7 +133,7 @@ index 40ee5b0..f3718dd 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +545,9 @@ def main():
+@@ -529,6 +553,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -121,6 +143,32 @@ index 40ee5b0..f3718dd 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
+@@ -652,6 +679,25 @@ def main():
+         queries=all_queries, num_to_retrieve=config.retrieval_top_k
+     )
+ 
++    # Sidecar with the FULL retrieval per question, as corpus indices.
++    # QuerySolution.to_dict() keeps only docs[:5], which cannot support recall@50
++    # or a downstream reranking stage, and dumping passage text for 1000 x 200
++    # would be ~150 MB. docs is built as f"{title}\n{text}" over the corpus in
++    # file order — identical to mbuzai.dataio.Dataset.docs on the same file — so
++    # the index here IS our pid and the dump scores directly against our gold.
++    _doc_to_idx = {_d: _i for _i, _d in enumerate(docs)}
++    _dump = {}
++    for _s, _r in zip(samples, retrieval_results):
++        _qid = str(_s.get("id") or _s.get("_id") or _s["question"])
++        _dump[_qid] = [_doc_to_idx.get(_d, -1) for _d in _r.docs]
++    os.makedirs(config.working_dir, exist_ok=True)
++    _arm = "vanilla" if not getattr(config, "subq_file", None) else config.subq_scope
++    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
++    with open(_dump_path, "w") as _f:
++        json.dump(_dump, _f)
++    _unmapped = sum(1 for _v in _dump.values() for _i in _v if _i < 0)
++    print(f"wrote {_dump_path}  ({len(_dump)} questions, {_unmapped} unmapped docs)")
++
+     # ----------------------------------------------------------------
+     # Retrieval evaluation
+     # ----------------------------------------------------------------
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
 index d015a39..3ffd772 100644
 --- a/src/passage_entity/config.py
