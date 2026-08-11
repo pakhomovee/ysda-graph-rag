@@ -23,7 +23,9 @@ TOPK=${TOPK:-10}
 LIMIT=${LIMIT:-}
 THRS=${THRS:-"0.4 0.3 0.2 0.1"}
 ITERS=${ITERS:-"3 5"}
-TOPKS=${TOPKS:-3}      # sentences kept per entity; raise to widen the frontier
+TOPKS=${TOPKS:-3}      # sentences kept per entity
+PRATIO=${PRATIO:-2}    # weight on the pooled-query DPR term
+TIERPEN=${TIERPEN:-1}  # 0 to drop the /hop-distance division
 PY=${PY:-python3}
 PY39=${PY39:-python3}
 EMB=${EMB:-sentence-transformers/all-mpnet-base-v2}
@@ -51,7 +53,7 @@ echo "    ok"
 
 for IT in $ITERS; do
   for T in $THRS; do
-    TAG="thr${T//./}_it${IT}_k${TOPKS}"
+    TAG="thr${T//./}_it${IT}_k${TOPKS}_p${PRATIO//./}_tp${TIERPEN}"
     STEM="$ROOT/out/linearrag_${OURS}_${TAG}"
     echo
     echo "############ iteration_threshold=$T  max_iterations=$IT ############"
@@ -61,7 +63,8 @@ for IT in $ITERS; do
         --dataset_name $THEIRS --device "$DEVICE" --retrieval_top_k "$TOPK" \
         --embedding_model "$EMB" --subq_file "$BYTEXT" \
         --iteration_threshold "$T" --max_iterations "$IT" \
-        --top_k_sentence "$TOPKS" \
+        --top_k_sentence "$TOPKS" --passage_ratio "$PRATIO" \
+        $( [ "$TIERPEN" = "0" ] && echo --no-tier-penalty ) \
         ${LIMIT:+--limit "$LIMIT"} --out "$STEM" )
     ELAPSED=$(( $(date +%s) - START ))
     echo "    cell took ${ELAPSED}s"

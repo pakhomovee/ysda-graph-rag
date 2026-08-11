@@ -1,5 +1,5 @@
 diff --git a/src/LinearRAG.py b/src/LinearRAG.py
-index 53aca01..6743350 100644
+index 53aca01..7fe3425 100644
 --- a/src/LinearRAG.py
 +++ b/src/LinearRAG.py
 @@ -12,6 +12,16 @@ import igraph as ig
@@ -151,15 +151,27 @@ index 53aca01..6743350 100644
          
          # Convert to torch tensors and move to device
          sentence_similarities = torch.from_numpy(sentence_similarities_np).float().to(self.device)
+@@ -497,7 +547,9 @@ class LinearRAG:
+                 entity_lower = self.entity_embedding_store.hash_id_to_text[entity_hash_id].lower()
+                 entity_occurrences = passage_text_lower.count(entity_lower)
+                 if entity_occurrences > 0:
+-                    denom = tier if tier >= 1 else 1
++                    # Divides each entity's contribution by its hop distance, which
++                    # damps precisely the distant activations sigma_max exists to create.
++                    denom = tier if (getattr(self.config, 'tier_penalty', True) and tier >= 1) else 1
+                     entity_bonus = entity_score * math.log(1 + entity_occurrences) / denom
+                     total_entity_bonus += entity_bonus
+ 
 diff --git a/src/config.py b/src/config.py
-index 83ab8e6..c265e0c 100644
+index 83ab8e6..e38295c 100644
 --- a/src/config.py
 +++ b/src/config.py
-@@ -18,6 +18,7 @@ class LinearRAGConfig:
+@@ -18,6 +18,8 @@ class LinearRAGConfig:
      passage_node_weight: float = 0.05
      damping: float = 0.5
      iteration_threshold: float = 0.5
 +    subq_file: str = None  # sigma_max arm; None = vanilla pooled query
++    tier_penalty: bool = True  # divide entity_bonus by hop distance (their default)
      use_vectorized_retrieval: bool = False  # True for vectorized matrix computation, False for BFS iteration
      enable_hybrid_attribute_fallback: bool = False
      attribute_keyword_boost: float = 0.25

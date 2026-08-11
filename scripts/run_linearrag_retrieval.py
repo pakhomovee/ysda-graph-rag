@@ -40,7 +40,10 @@ def parse_args():
     ap.add_argument("--top_k_sentence", type=int, default=3)
     ap.add_argument("--max_iterations", type=int, default=3)
     ap.add_argument("--iteration_threshold", type=float, default=0.4)
-    ap.add_argument("--passage_ratio", type=float, default=2)
+    ap.add_argument("--passage_ratio", type=float, default=2,
+                    help="weight on the POOLED-query DPR term in every passage score")
+    ap.add_argument("--no-tier-penalty", dest="tier_penalty", action="store_false",
+                    help="stop dividing each entity's passage bonus by its hop distance")
     ap.add_argument("--use_vectorized_retrieval", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--device", default=None, help="sets CUDA_VISIBLE_DEVICES")
@@ -111,6 +114,7 @@ def main():
         iteration_threshold=args.iteration_threshold,
         passage_ratio=args.passage_ratio,
         use_vectorized_retrieval=args.use_vectorized_retrieval,
+        tier_penalty=args.tier_penalty,
         subq_file=None,                     # arm 1; switched below for arm 2
     )
     rag = LinearRAG(global_config=config)
