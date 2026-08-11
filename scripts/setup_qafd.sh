@@ -67,13 +67,12 @@ cat <<EOF
     . .venv-qafd/bin/activate
     uv pip install -r $SUB/requirements.txt
 
-  Their defaults are heavy and NOT comparable to the rest of this repo:
-    embedding_model_key = "nvidia-nv-embed-v2"   (a 7B embedding model)
-    llm_model           = "gpt-4o-mini"          (OpenIE over every passage)
-  For a like-for-like row, point the embedding at all-mpnet-base-v2 if their
-  registry allows it, and the LLM at your local vLLM server. If the encoder
-  cannot be matched, say so in the writeup rather than comparing across
-  encoders — the encoder is worth more than the intervention.
+  Their registry shipped no sentence-transformers option — NV-Embed-v2 (7B),
+  GritLM (7B), Jina-v3, OpenAI — so the patch adds one and registers it as
+  "mpnet". Use it: every other row in this repo is all-mpnet-base-v2 (110M), and
+  a 7B encoder would win on encoder strength alone, saying nothing about flow
+  diffusion.
+    --embedding_model mpnet
 
   Indexing runs OpenIE over the corpus, so budget for ~11.7k LLM calls on
   MuSiQue. Serve gpt-oss-20b and set llm_base_url to it:
