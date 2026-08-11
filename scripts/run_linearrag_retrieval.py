@@ -72,7 +72,7 @@ def main():
     sys.path.insert(0, os.getcwd())
     from src.config import LinearRAGConfig
     from src.LinearRAG import LinearRAG
-    from mbuzai.subq_io import load_query_sets
+    from mbuzai.subq_io import load_query_sets, lookup
 
     with open(f"dataset/{args.dataset_name}/questions.json", encoding="utf-8") as fh:
         questions = json.load(fh)
@@ -107,6 +107,16 @@ def main():
     for name, query_sets in arms:
         rag.query_sets = query_sets
         print("\n=== arm: %s ===" % name)
+        if query_sets is not None:
+            # A silent join failure and a real null result look identical in the
+            # final table, so refuse to produce the ambiguous one.
+            hits = sum(1 for q in questions if lookup(query_sets, q["question"]))
+            print("query sets matched: %d/%d questions" % (hits, len(questions)))
+            if hits == 0:
+                sys.exit("FATAL: no question matched a query set — the text join is "
+                         "broken, and this arm would be vanilla wearing a different name")
+            if hits < len(questions) // 2:
+                print("WARNING: under half matched; the delta is diluted toward zero")
         results = rag.retrieve(questions)
         out = {}
         for q, r in zip(questions, results):
