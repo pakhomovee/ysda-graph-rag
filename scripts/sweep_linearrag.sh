@@ -23,6 +23,7 @@ TOPK=${TOPK:-10}
 LIMIT=${LIMIT:-}
 THRS=${THRS:-"0.4 0.3 0.2 0.1"}
 ITERS=${ITERS:-"3 5"}
+TOPKS=${TOPKS:-3}      # sentences kept per entity; raise to widen the frontier
 PY=${PY:-python3}
 PY39=${PY39:-python3}
 EMB=${EMB:-sentence-transformers/all-mpnet-base-v2}
@@ -50,7 +51,7 @@ echo "    ok"
 
 for IT in $ITERS; do
   for T in $THRS; do
-    TAG="thr${T//./}_it${IT}"
+    TAG="thr${T//./}_it${IT}_k${TOPKS}"
     STEM="$ROOT/out/linearrag_${OURS}_${TAG}"
     echo
     echo "############ iteration_threshold=$T  max_iterations=$IT ############"
@@ -60,6 +61,7 @@ for IT in $ITERS; do
         --dataset_name $THEIRS --device "$DEVICE" --retrieval_top_k "$TOPK" \
         --embedding_model "$EMB" --subq_file "$BYTEXT" \
         --iteration_threshold "$T" --max_iterations "$IT" \
+        --top_k_sentence "$TOPKS" \
         ${LIMIT:+--limit "$LIMIT"} --out "$STEM" )
     ELAPSED=$(( $(date +%s) - START ))
     echo "    cell took ${ELAPSED}s"
@@ -70,7 +72,7 @@ for IT in $ITERS; do
         | sed -n '/^absolute recall/,/^  \* =/p' | head -20
     $PY "$ROOT/scripts/report_entities.py" $OURS \
         --traces "$ROOT/out/entities_linearrag_${OURS}_${TAG}"_*.json \
-        | grep -E "tier |bypassed|beyond the seed" || true
+        | grep -E "tier |bypassed|beyond the seed|consumed|entities/question" || true
   done
 done
 
