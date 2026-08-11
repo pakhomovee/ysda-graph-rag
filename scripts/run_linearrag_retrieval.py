@@ -44,6 +44,13 @@ def parse_args():
                     help="weight on the POOLED-query DPR term in every passage score")
     ap.add_argument("--no-tier-penalty", dest="tier_penalty", action="store_false",
                     help="stop dividing each entity's passage bonus by its hop distance")
+    ap.add_argument("--path-gate", dest="path_gate", action="store_true",
+                    help="gate hop t by sub-question t instead of the whole set")
+    ap.add_argument("--path-window", dest="path_window", type=int, default=0,
+                    help="0 = exact index; 1 also admits t-1 and t+1")
+    ap.add_argument("--path-reverse", dest="path_reverse", action="store_true",
+                    help="control: reverse the sub-question order. If the ORDER "
+                         "carries the signal this should hurt.")
     ap.add_argument("--use_vectorized_retrieval", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--device", default=None, help="sets CUDA_VISIBLE_DEVICES")
@@ -63,7 +70,7 @@ def chunk_id(passage_text):
     return int(head) if head.isdigit() else None
 
 
-def arm_name(subq_path):
+def arm_name(subq_path, args=None):
     """Name the arm after its sub-question set.
 
     Calling every non-vanilla arm "subq" meant a second run silently overwrote
@@ -75,8 +82,14 @@ def arm_name(subq_path):
         stem = stem[: -len("_bytext")]
     for tag in ("generated", "resolved", "raw"):
         if stem.endswith(tag):
-            return tag
-    return "subq"
+            break
+    else:
+        tag = "subq"
+    if args is not None and getattr(args, "path_gate", False):
+        tag += "pathrev" if args.path_reverse else "path"
+        if args.path_window:
+            tag += "w%d" % args.path_window
+    return tag
 
 
 def main():
@@ -115,6 +128,9 @@ def main():
         passage_ratio=args.passage_ratio,
         use_vectorized_retrieval=args.use_vectorized_retrieval,
         tier_penalty=args.tier_penalty,
+        path_gate=args.path_gate,
+        path_window=args.path_window,
+        path_reverse=args.path_reverse,
         subq_file=None,                     # arm 1; switched below for arm 2
     )
     rag = LinearRAG(global_config=config)
@@ -122,7 +138,7 @@ def main():
 
     arms = [("vanilla", None)]
     if args.subq_file:
-        arms.append((arm_name(args.subq_file), load_query_sets(args.subq_file)))
+        arms.append((arm_name(args.subq_file, args), load_query_sets(args.subq_file)))
 
     for name, query_sets in arms:
         rag.query_sets = query_sets

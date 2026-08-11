@@ -1,5 +1,5 @@
 diff --git a/src/LinearRAG.py b/src/LinearRAG.py
-index 53aca01..7fe3425 100644
+index 53aca01..62e032b 100644
 --- a/src/LinearRAG.py
 +++ b/src/LinearRAG.py
 @@ -12,6 +12,16 @@ import igraph as ig
@@ -32,7 +32,7 @@ index 53aca01..7fe3425 100644
  
      def load_embedding_store(self):
          self.passage_embedding_store = EmbeddingStore(self.config.embedding_model, db_filename=os.path.join(self.config.working_dir,self.dataset_name, "passage_embedding.parquet"), batch_size=self.config.batch_size, namespace="passage")
-@@ -105,12 +121,22 @@ class LinearRAG:
+@@ -105,12 +121,24 @@ class LinearRAG:
              logger.info(f"Device: {self.device}")
  
          retrieval_results = []
@@ -44,6 +44,8 @@ index 53aca01..7fe3425 100644
 +            # No sub-questions -> a (1, d) matrix, and the max over one row is the
 +            # pooled dot product bit for bit.
 +            subqs = lookup(self.query_sets, question) if self.query_sets else None
++            if subqs and getattr(self.config, "path_reverse", False):
++                subqs = list(subqs)[::-1]   # control: does the ORDER carry the signal?
 +            if subqs:
 +                query_embeddings = self.config.embedding_model.encode([question] + list(subqs),normalize_embeddings=True,show_progress_bar=False,batch_size=self.config.batch_size)
 +            else:
@@ -56,7 +58,7 @@ index 53aca01..7fe3425 100644
                  final_passage_hash_ids = sorted_passage_hash_ids[:self.config.retrieval_top_k]
                  final_passage_scores = sorted_passage_scores[:self.config.retrieval_top_k]
                  final_passages = [self.passage_embedding_store.hash_id_to_text[passage_hash_id] for passage_hash_id in final_passage_hash_ids]
-@@ -126,6 +152,20 @@ class LinearRAG:
+@@ -126,6 +154,20 @@ class LinearRAG:
                  "gold_answer": question_info["answer"]
              }
              retrieval_results.append(result)
@@ -77,7 +79,7 @@ index 53aca01..7fe3425 100644
          return retrieval_results
      
      def _precompute_sparse_matrices(self):
-@@ -183,11 +223,12 @@ class LinearRAG:
+@@ -183,11 +225,12 @@ class LinearRAG:
                  (num_sentences, num_entities), device=self.device
              )
              
@@ -93,11 +95,33 @@ index 53aca01..7fe3425 100644
          passage_weights = self.calculate_passage_scores(question, question_embedding, actived_entities)
          node_weights = entity_weights + passage_weights
          ppr_sorted_passage_indices,ppr_sorted_passage_scores = self.run_ppr(node_weights)
-@@ -215,11 +256,17 @@ class LinearRAG:
+@@ -215,11 +258,39 @@ class LinearRAG:
          
          return sorted_passage_hash_ids, sorted_passage_scores.tolist()
  
 -    def calculate_entity_scores(self,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores):
++    def _path_rows(self, q_set, tier):
++        """The rows of the query set appropriate to THIS hop.
++
++        A decomposition is a chain, and sigma_max over the whole set discards the
++        order: an expansion whose sentences match sub-question 1 scores exactly
++        like one that advances from sub-question 1 to 2. Gating a tier-t
++        expansion by sub-question t makes the search follow the decomposition
++        rather than treating it as a bag.
++
++        Row 0 is the original question and is always kept, so sigma_max >=
++        sigma_q still holds elementwise and the arm cannot fall below vanilla by
++        construction — the stage-appropriate sub-question is added, not
++        substituted.
++        """
++        m = q_set.shape[0]
++        if m < 2:
++            return q_set
++        idx = min(max(int(tier), 1), m - 1)
++        w = int(getattr(self.config, "path_window", 0))
++        lo, hi = max(1, idx - w), min(m - 1, idx + w)
++        return q_set[[0] + list(range(lo, hi + 1))]
++
 +    def calculate_entity_scores(self,question_embedding,seed_entity_indices,seed_entities,seed_entity_hash_ids,seed_entity_scores,query_embeddings=None):
          actived_entities = {}
 +        # actived_entities.update() overwrites an entity's tier when it is reached
@@ -112,18 +136,20 @@ index 53aca01..7fe3425 100644
              seed_entity_node_idx = self.node_name_to_vertex_idx[seed_entity_hash_id]
              entity_weights[seed_entity_node_idx] = seed_entity_score    
          used_sentence_hash_ids = set()
-@@ -235,8 +282,8 @@ class LinearRAG:
+@@ -235,8 +306,10 @@ class LinearRAG:
                      continue
                  sentence_indices = [self.sentence_embedding_store.hash_id_to_idx[sid] for sid in sentence_hash_ids]
                  sentence_embeddings = self.sentence_embeddings[sentence_indices]
 -                question_emb = question_embedding.reshape(-1, 1) if len(question_embedding.shape) == 1 else question_embedding
 -                sentence_similarities = np.dot(sentence_embeddings, question_emb).flatten()
 +                q_set = query_embeddings if query_embeddings is not None else question_embedding.reshape(1, -1)
++                if getattr(self.config, "path_gate", False):
++                    q_set = self._path_rows(q_set, tier)
 +                sentence_similarities = sigma_max(sentence_embeddings, q_set)
                  top_sentence_indices = np.argsort(sentence_similarities)[::-1][:self.config.top_k_sentence]
                  for top_sentence_index in top_sentence_indices:
                      top_sentence_hash_id = sentence_hash_ids[top_sentence_index]
-@@ -250,12 +297,15 @@ class LinearRAG:
+@@ -250,12 +323,15 @@ class LinearRAG:
                          next_enitity_node_idx = self.node_name_to_vertex_idx[next_entity_hash_id]
                          entity_weights[next_enitity_node_idx] += next_entity_score
                          new_entities[next_entity_hash_id] = (next_enitity_node_idx, next_entity_score, iteration+1)
@@ -140,18 +166,24 @@ index 53aca01..7fe3425 100644
          """
          GPU-accelerated vectorized version using PyTorch sparse tensors.
          Uses sparse representation for both matrices and entity score vectors for maximum efficiency.
-@@ -270,8 +320,8 @@ class LinearRAG:
+@@ -270,8 +346,14 @@ class LinearRAG:
          num_sentences = len(self.sentence_hash_ids)
          
          # Compute all sentence similarities with the question at once
 -        question_emb = question_embedding.reshape(-1, 1) if len(question_embedding.shape) == 1 else question_embedding
 -        sentence_similarities_np = np.dot(self.sentence_embeddings, question_emb).flatten()
++        if getattr(self.config, "path_gate", False):
++            raise ValueError(
++                "path_gate needs per-hop gating, but the vectorized path scores every "
++                "sentence once before the traversal and has no tier to align to. "
++                "Drop --use_vectorized_retrieval."
++            )
 +        q_set = query_embeddings if query_embeddings is not None else question_embedding.reshape(1, -1)
 +        sentence_similarities_np = sigma_max(self.sentence_embeddings, q_set)
          
          # Convert to torch tensors and move to device
          sentence_similarities = torch.from_numpy(sentence_similarities_np).float().to(self.device)
-@@ -497,7 +547,9 @@ class LinearRAG:
+@@ -497,7 +579,9 @@ class LinearRAG:
                  entity_lower = self.entity_embedding_store.hash_id_to_text[entity_hash_id].lower()
                  entity_occurrences = passage_text_lower.count(entity_lower)
                  if entity_occurrences > 0:
@@ -163,14 +195,17 @@ index 53aca01..7fe3425 100644
                      total_entity_bonus += entity_bonus
  
 diff --git a/src/config.py b/src/config.py
-index 83ab8e6..e38295c 100644
+index 83ab8e6..30a939e 100644
 --- a/src/config.py
 +++ b/src/config.py
-@@ -18,6 +18,8 @@ class LinearRAGConfig:
+@@ -18,6 +18,11 @@ class LinearRAGConfig:
      passage_node_weight: float = 0.05
      damping: float = 0.5
      iteration_threshold: float = 0.5
 +    subq_file: str = None  # sigma_max arm; None = vanilla pooled query
++    path_gate: bool = False    # gate hop t by sub-question t, not the whole set
++    path_window: int = 0       # 0 = exact index, 1 = also t-1 and t+1
++    path_reverse: bool = False # control: reverse the sub-question order
 +    tier_penalty: bool = True  # divide entity_bonus by hop distance (their default)
      use_vectorized_retrieval: bool = False  # True for vectorized matrix computation, False for BFS iteration
      enable_hybrid_attribute_fallback: bool = False
