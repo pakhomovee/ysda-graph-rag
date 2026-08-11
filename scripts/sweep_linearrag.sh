@@ -38,6 +38,8 @@ BYTEXT="$ROOT/out/$(basename "${SUBQ%.json}")_bytext.json"
 echo "==> preflight"
 grep -q "sigma_max(sentence_embeddings" "$SUB/src/LinearRAG.py" \
     || { echo "LinearRAG is not patched — run: bash scripts/setup_linearrag.sh" >&2; exit 1; }
+grep -q "entity_trace" "$SUB/src/LinearRAG.py" \
+    || { echo "submodule has an older patch (no entity instrumentation) — run: bash scripts/setup_linearrag.sh" >&2; exit 1; }
 [ -f "$SUB/dataset/$THEIRS/chunks.json" ] || { echo "bundle missing" >&2; exit 1; }
 [ -f "$SUBQ" ] || { echo "missing $SUBQ" >&2; exit 1; }
 

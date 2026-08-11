@@ -52,6 +52,13 @@ def main():
                     for p in q.gold_pids
                 )
 
+    missing = [p for p in args.traces if not p.exists()]
+    if missing:
+        print("no trace files matched: " + ", ".join(p.name for p in missing))
+        print("The run predates the instrumentation — re-run "
+              "'bash scripts/setup_linearrag.sh' to update the patch, then retry.")
+        return
+
     for path in args.traces:
         trace = json.loads(path.read_text())
         arm = path.stem.split("_")[-1]

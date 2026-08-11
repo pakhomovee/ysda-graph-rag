@@ -29,10 +29,24 @@ elif git -C "$SUB" apply --check "$PATCH" 2>/dev/null; then
     git -C "$SUB" apply "$PATCH"
     echo "    applied $(basename "$PATCH")"
 else
-    echo "    FATAL: patch neither applies nor is already applied." >&2
-    echo "    The submodule is not at the pinned commit, or has local edits:" >&2
-    git -C "$SUB" status --short >&2
-    exit 1
+    # Neither clean nor current: almost always an OLDER revision of this same
+    # patch, left over from before the patch file was updated. Every change we
+    # make to LinearRAG lives in the patch and nowhere else, so resetting the
+    # files it touches and reapplying is safe and is the only way a patch update
+    # ever lands. Anything else here is a genuine conflict.
+    FILES=$(git -C "$SUB" apply --numstat "$PATCH" | awk '{print $3}')
+    echo "    patch is out of date in the working tree; resetting and reapplying:"
+    echo "$FILES" | sed 's/^/      /'
+    # shellcheck disable=SC2086
+    git -C "$SUB" checkout -- $FILES
+    if git -C "$SUB" apply "$PATCH"; then
+        echo "    reapplied $(basename "$PATCH")"
+    else
+        echo "    FATAL: patch does not apply even to a clean tree." >&2
+        echo "    The submodule is not at the pinned commit:" >&2
+        git -C "$SUB" log -1 --format='      at %h %s' >&2
+        exit 1
+    fi
 fi
 
 echo "==> sanity"
