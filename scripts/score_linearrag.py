@@ -81,8 +81,14 @@ def main():
     if len(qids) < len(gold):
         print(f"  ({len(gold) - len(qids)} skipped: no gold chunks, or absent from a run)")
 
-    print(f"\nabsolute recall  (over LinearRAG's chunk corpus — NOT comparable to "
-          "baselines.py)")
+    # Their chunk ids top out around 1.3k; ours run to len(corpus). If the runs
+    # index our own passages, the numbers ARE comparable and saying otherwise
+    # would be the more damaging error.
+    max_id = max((max(v) for v in arms[args.baseline].values() if v), default=0)
+    fine = max_id >= len(ds.corpus) * 0.5
+    print("\nabsolute recall  " + ("(over OUR passage corpus — directly comparable to "
+          "baselines.py and eval_subq.py)" if fine else
+          "(over LinearRAG's chunk corpus — NOT comparable to baselines.py)"))
     per_q = {}
     for name, run in sorted(arms.items()):
         cells = []
