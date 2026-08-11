@@ -50,6 +50,12 @@ def main():
     ap.add_argument("--model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--subq", type=Path, default=None,
+                    help="qid-keyed sub-question file. Scores each candidate against "
+                         "the whole query set and keeps the max — sigma_max at the "
+                         "reranking stage. Without it the cross-encoder rescores with "
+                         "the pooled question, which is the representation sigma_max "
+                         "exists to replace, and buries whatever it surfaced.")
     args = ap.parse_args()
 
     ds = dataio.load(args.dataset)
@@ -58,6 +64,11 @@ def main():
     question_of = {}
     for q in ds.queries:
         question_of[q.qid] = q.question
+
+    subq = json.loads(args.subq.read_text()) if args.subq else {}
+    if subq:
+        n_cov = sum(1 for q in ds.queries if subq.get(q.qid))
+        print(f"sigma_max reranking: {n_cov}/{len(ds.queries)} questions have sub-questions")
 
     from sentence_transformers import CrossEncoder
 
@@ -83,13 +94,17 @@ def main():
             if question is None or not ids:
                 out[tid] = ids[: args.topk]
                 continue
-            scores = ce.predict([(question, docs[i]) for i in ids],
-                                batch_size=args.batch_size, show_progress_bar=False)
-            order = np.argsort(-np.asarray(scores))[: args.topk]
+            queries = [question] + list(subq.get(qid, []))   # row 0 is the question
+            pairs = [(q, docs[i]) for q in queries for i in ids]
+            flat = np.asarray(ce.predict(pairs, batch_size=args.batch_size,
+                                         show_progress_bar=False))
+            # (len(queries), len(ids)) -> max over the query set, as sigma_max does
+            scores = flat.reshape(len(queries), len(ids)).max(axis=0)
+            order = np.argsort(-scores)[: args.topk]
             out[tid] = [int(ids[i]) for i in order]
 
         stem = path.stem
-        dest = path.with_name(f"{stem}rr.json")
+        dest = path.with_name(f"{stem}rr{'x' if subq else ''}.json")
         dest.write_text(json.dumps(out, indent=1))
         print(f"wrote {dest.name}  (from {path.name}, depth {max(depths, default=0)} "
               f"-> {args.topk})")
