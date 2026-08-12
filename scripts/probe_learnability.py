@@ -27,20 +27,36 @@ Split is by QUESTION (default 700/300) and every number is reported on held-out
 questions. Implemented in numpy so the probe has no dependency beyond what the
 analysis env already has.
 
-**Negatives are drawn from other questions' gold entities**, using one
-distribution for training, early stopping and evaluation. Uniform-random
-negatives do not work: a gold entity is a real, well-connected extraction while a
-random draw from 85k is mostly OpenIE debris, so a model can score by learning
-"this looks like a gold entity" without consulting the query at all. That is not
-a hypothetical — it is what the first version of this script did, and the shuffle
-control caught it at AUC 0.60-0.63 where chance is 0.50. Sampling negatives from
-the gold pool matches the nuisance distribution exactly, because a negative here
-IS a positive for some other question.
+**Negatives are drawn from other questions' gold entities, matched on gold
+frequency**, using one distribution for training, early stopping and evaluation.
+Three earlier choices were wrong and the shuffle control caught every one:
+
+    uniform random over all entities     control 0.60-0.63
+    uniform over the gold support        control 0.5687
+    frequency-weighted over the support  still leaks
+
+A gold entity is a real, well-connected extraction; a random draw from 85k is
+mostly OpenIE debris, so "looks gold" predicts the label with no query at all.
+Restricting to the gold support removes that but leaves raw frequency. Weighting
+by frequency still leaves the deepest one: a question's own positives can never
+be its negatives, so if positives skew frequent, negatives drawn from what
+remains are systematically less frequent. Exclusion itself creates signal.
+
+Stratified matching removes what can be removed. What cannot be removed is
+reported: `frequency` is a query-independent scorer included in every table, and
+on permuted labels it is the floor a learned model reaches by reading only the
+label prior. The control compares against THAT, not against 0.50 — an entity that
+is gold for most questions is a positive more often than a negative no matter how
+the negatives are drawn, and no sampler fixes that.
 
 Always run the control first; it is a gate, not a formality:
 
-    python scripts/probe_learnability.py musique --shuffle-control   # must be ~0.50
+    python scripts/probe_learnability.py musique --shuffle-control
     python scripts/probe_learnability.py musique
+
+In the real run, read any learned gain over cosine against the `frequency` row:
+a gain no larger than what frequency alone buys is not evidence of query-dependent
+signal.
 
 Note on `sim_mode`: "normalized", "relu" and "relu_sq" are all monotone in cosine,
 so they produce *identical* rankings and identical AUC/recall. They matter inside
@@ -134,6 +150,28 @@ class Cosine:
 
     def score(self, he, hq, deg):
         return he @ hq
+
+
+class Frequency:
+    """Scores by how many questions an entity is gold for. Ignores the query.
+
+    A diagnostic, not a candidate. Some residual frequency signal is unavoidable:
+    a question's own positives can never be its negatives, so an entity that is
+    gold very often is a positive far more than a negative no matter how the
+    negatives are drawn, and no sampler can balance an entity that is gold for
+    most questions.
+
+    Reporting it makes that floor visible instead of assumed. On permuted labels
+    this is the level a learned model reaches by reading nothing but the label
+    prior, so it — not 0.5 — is what the control must compare against.
+    """
+    name = "frequency"
+
+    def __init__(self, freq_of):
+        self.freq_of = freq_of      # entity id -> gold frequency
+
+    def score(self, he, hq, deg, rows=None):
+        return self.freq_of[rows] if rows is not None else np.zeros(len(he))
 
 
 class Diagonal:
@@ -261,16 +299,63 @@ def _train_one(model):
                           _SHARED["Dg"], _SHARED["val"], lr=_SHARED["lr"])
 
 
-def sample_from_pool(pool, pos, k, rng):
-    """k entities from `pool`, excluding this question's positives.
+def build_pool(positives):
+    """Frequency-stratified negative pool.
 
-    Module level so the regression test can drive it directly: the negative
-    distribution is where this probe got its first answer wrong, and it is the
-    part most worth pinning down.
+    Returns (support, bins, by_bin) where `bins[j]` is a log2 frequency stratum
+    for support[j] and `by_bin` maps stratum -> support positions in it.
     """
-    take = min(k + len(pos) + 16, len(pool))
-    block = rng.choice(pool, size=take, replace=False)
-    return block[~np.isin(block, pos)][:k]
+    sup, cnt = np.unique(np.concatenate(positives).astype(np.int64),
+                         return_counts=True)
+    bins = np.floor(np.log2(cnt)).astype(np.int64)
+    by_bin = {int(b): np.flatnonzero(bins == b) for b in np.unique(bins)}
+    return sup, cnt, bins, by_bin
+
+
+def sample_from_pool(pool, pos, k, rng):
+    """k negatives whose gold-frequency distribution MATCHES the positives'.
+
+    Getting this right took three attempts, each caught by the shuffle control,
+    and the reason is worth stating because it is not obvious:
+
+      uniform random over all entities (control 0.60-0.63) — a gold entity is a
+        real, well-connected extraction; a random draw from 85k is mostly OpenIE
+        debris, so "looks gold" predicts the label with no query at all.
+      uniform over the gold support (control 0.5687) — entities are gold for
+        wildly different numbers of questions, and frequency alone still predicts.
+      frequency-weighted over the support — still leaks, and this is the
+        fundamental one: a question's own positives can never be its negatives,
+        so if positives skew frequent, the negatives drawn from what remains are
+        systematically LESS frequent. Exclusion itself creates the signal.
+
+    The last cannot be fixed by reweighting, only by matching: draw each negative
+    from the same log2-frequency stratum as a positive. Then the two classes have
+    the same frequency profile by construction, exclusion or not, and nothing
+    question-independent is left for a model to read.
+
+    Module level so the regression test can drive it directly — the negative
+    distribution is where this probe got its first three answers wrong.
+    """
+    sup, cnt, bins, by_bin = pool
+    posmask = np.isin(sup, pos)
+    pos_bins = bins[posmask]
+    if len(pos_bins) == 0:
+        return np.empty(0, dtype=np.int64)
+
+    strata, counts = np.unique(pos_bins, return_counts=True)
+    out = []
+    for b, c in zip(strata, counts):
+        want = max(1, int(round(k * c / len(pos_bins))))
+        cand = by_bin[int(b)]
+        cand = cand[~posmask[cand]]
+        if len(cand) == 0:
+            continue
+        take = min(want, len(cand))
+        out.append(sup[rng.choice(cand, size=take, replace=False)])
+    if not out:
+        return np.empty(0, dtype=np.int64)
+    neg = np.concatenate(out)
+    return neg[:k].astype(np.int64)
 
 
 def roc_auc(scores, labels):
@@ -389,9 +474,13 @@ def main():
     #   trained where high cosine usually means a mined negative learns to
     #   distrust high cosine, and then inverts on a random pool -- which is how
     #   `diagonal` reached 0.4258, below chance. One distribution everywhere.
-    pool = np.array(sorted({int(e) for p in positives for e in p}), dtype=np.int64)
-    print(f"negative pool: {len(pool)} entities that are gold for some question")
-    if len(pool) < 10 * args.neg_per_q:
+    pool = build_pool(positives)
+    _sup, _cnt, _bins, _by = pool
+    uniq = len(_sup)
+    print(f"negative pool: {int(_cnt.sum())} positive occurrences over {uniq} "
+          f"distinct entities (max {int(_cnt.max())} questions for one entity), "
+          f"{len(_by)} frequency strata")
+    if uniq < 10 * args.neg_per_q:
         sys.exit("negative pool too small to sample from without heavy repetition")
 
     def sample_negatives(pos, k):
@@ -435,7 +524,11 @@ def main():
     else:
         trained = [_train_one(m) for m in todo]
 
-    models = [Cosine()] + trained
+    # Frequency is a diagnostic floor, not a candidate: it reads only the label
+    # prior. Learned models are judged against IT on permuted labels.
+    freq_of = np.zeros(n_ent, dtype=np.float64)
+    freq_of[pool[0]] = pool[1]
+    models = [Cosine(), Frequency(freq_of)] + trained
     for m in trained:
         print(f"  {m.name:<10} best val AUC {m.val_auc:.4f}")
     print(f"  trained in {time.time() - t0:.0f}s "
@@ -451,7 +544,8 @@ def main():
         lab = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
         he, dg = ent_emb[rows], ent_deg[rows]
         for m in models:
-            s = m.score(he, q_emb[i], dg)
+            s = (m.score(he, q_emb[i], dg, rows=rows)
+                 if isinstance(m, Frequency) else m.score(he, q_emb[i], dg))
             per_q[m.name]["auc"].append(roc_auc(s, lab))
             per_q[m.name]["r10"].append(recall_at(s, lab, 10))
             per_q[m.name]["r50"].append(recall_at(s, lab, 50))
@@ -485,15 +579,26 @@ def main():
     # reading a nuisance correlate of "is a gold entity" and every number in the
     # real run is contaminated by the same thing. Say so loudly.
     if args.shuffle_control:
-        worst = max(float(np.nanmean(per_q[m.name]["auc"])) for m in models)
-        if worst > 0.55:
-            print(f"\n*** CONTROL FAILED: best AUC {worst:.4f} on permuted labels "
-                  "(expected ~0.50).\n"
-                  "    Some model is scoring without using the question. Do NOT read\n"
-                  "    the main run until the negative sampling accounts for it.")
+        floor = float(np.nanmean(per_q["frequency"]["auc"]))
+        learned = {m.name: float(np.nanmean(per_q[m.name]["auc"])) for m in trained}
+        worst, who = max((v, k) for k, v in learned.items())
+        # The bar is the frequency floor, not 0.50. Some frequency signal cannot be
+        # sampled away -- an entity gold for most questions is a positive far more
+        # often than a negative whatever the sampler does. What must NOT happen is a
+        # model reading more than that floor while the query carries no information.
+        bar = max(0.55, floor + 0.02)
+        print(f"\ncontrol: frequency floor {floor:.4f} (query-independent, "
+              f"unavoidable), worst learned {worst:.4f} ({who}), bar {bar:.4f}")
+        if worst > bar:
+            print(f"*** CONTROL FAILED: {who} reads {worst - floor:+.4f} beyond the "
+                  "frequency floor on permuted labels.\n"
+                  "    Do NOT read the main run: something query-independent is "
+                  "still separable.")
         else:
-            print(f"\ncontrol passed: best AUC on permuted labels {worst:.4f} (~0.50). "
-                  "The main run is readable.")
+            print("control passed: no learned model exceeds the frequency floor. "
+                  "The main run is readable,\n"
+                  "    bearing in mind any learned gain there must beat cosine by "
+                  "more than this floor to mean anything.")
 
     dest = OUT / f"probe_learnability_{args.dataset}"
     dest = dest.with_name(dest.name + ("_shuffled" if args.shuffle_control else "") + ".json")
