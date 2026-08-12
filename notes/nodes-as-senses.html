@@ -1,0 +1,774 @@
+<title>Nodes as Senses</title>
+<style>
+  :root {
+    --bg:        #F4F7F5;
+    --surface:   #FFFFFF;
+    --surface-2: #ECF1EE;
+    --ink:       #151B1A;
+    --muted:     #5B6A66;
+    --rule:      #D9E1DD;
+    --rule-soft: #E6ECE9;
+    --merge:     #0F6E62;
+    --split:     #A8492A;
+    --shadow:    0 1px 2px rgba(20,40,35,.05), 0 8px 24px -12px rgba(20,40,35,.14);
+    --sans:  ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --mono:  ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0F1413;
+      --surface:   #161D1B;
+      --surface-2: #1C2523;
+      --ink:       #E4EAE7;
+      --muted:     #93A29D;
+      --rule:      #29332F;
+      --rule-soft: #212B28;
+      --merge:     #55D2BB;
+      --split:     #E4906A;
+      --shadow:    0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0F1413;
+    --surface:   #161D1B;
+    --surface-2: #1C2523;
+    --ink:       #E4EAE7;
+    --muted:     #93A29D;
+    --rule:      #29332F;
+    --rule-soft: #212B28;
+    --merge:     #55D2BB;
+    --split:     #E4906A;
+    --shadow:    0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+  }
+  .wrap { max-width: 47rem; margin: 0 auto; }
+
+  /* ---- masthead ---- */
+  header.masthead {
+    padding: 4.5rem 0 2rem;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 2.5rem;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 1.1rem;
+  }
+  h1 {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: clamp(2.1rem, 6vw, 3.1rem);
+    line-height: 1.02;
+    letter-spacing: -.032em;
+    font-weight: 660;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 1.16rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: 0;
+    max-width: 34rem;
+  }
+
+  /* ---- sections ---- */
+  section { margin: 0 0 3.6rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .66rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--merge);
+    display: flex;
+    align-items: center;
+    gap: .8rem;
+    margin: 0 0 .9rem;
+  }
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+  h2 {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 1.6rem;
+    line-height: 1.16;
+    letter-spacing: -.022em;
+    font-weight: 640;
+    margin: 0 0 1rem;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 1.02rem;
+    letter-spacing: -.012em;
+    font-weight: 640;
+    margin: 2rem 0 .5rem;
+  }
+  p { margin: 0 0 1.05rem; }
+  a { color: var(--merge); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--merge); outline-offset: 3px; border-radius: 2px; }
+  strong { font-weight: 700; }
+  code {
+    font-family: var(--mono);
+    font-size: .84em;
+    background: var(--surface-2);
+    padding: .1em .34em;
+    border-radius: 3px;
+  }
+
+  /* ---- claim ledger ---- */
+  .ledger { display: flex; flex-direction: column; gap: 0; margin: 1.6rem 0 0; }
+  .claim {
+    display: grid;
+    grid-template-columns: 1.6rem 1fr auto;
+    gap: 0 1rem;
+    align-items: baseline;
+    padding: 1rem 0;
+    border-top: 1px solid var(--rule);
+  }
+  .claim:last-child { border-bottom: 1px solid var(--rule); }
+  .claim .tag {
+    font-family: var(--mono);
+    font-size: .72rem;
+    color: var(--muted);
+  }
+  .claim .body { font-size: .97rem; }
+  .claim .body b {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .95rem;
+    letter-spacing: -.01em;
+    display: block;
+    margin-bottom: .1rem;
+  }
+  .verdict {
+    font-family: var(--mono);
+    font-size: .64rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: .26em .6em;
+    border-radius: 2px;
+    white-space: nowrap;
+    border: 1px solid currentColor;
+  }
+  .v-yes  { color: var(--merge); }
+  .v-no   { color: var(--split); }
+  .v-mid  { color: var(--muted); }
+  @media (max-width: 34rem) {
+    .claim { grid-template-columns: 1.6rem 1fr; }
+    .verdict { grid-column: 2; justify-self: start; margin-top: .5rem; }
+  }
+
+  /* ---- data ---- */
+  .datablock {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    padding: 1.3rem 1.4rem 1.1rem;
+    margin: 1.7rem 0;
+  }
+  .datablock > .cap {
+    font-family: var(--mono);
+    font-size: .66rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 .9rem;
+  }
+  .scroller { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: .8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th {
+    text-align: right;
+    font-weight: 500;
+    color: var(--muted);
+    font-size: .66rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: 0 0 .5rem;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  td {
+    padding: .42rem 0;
+    border-bottom: 1px solid var(--rule-soft);
+    text-align: right;
+    white-space: nowrap;
+  }
+  td:first-child { padding-right: 1.4rem; }
+  th + th, td + td { padding-left: 1.1rem; }
+  tr:last-child td { border-bottom: none; }
+  .hi td { color: var(--split); font-weight: 600; }
+  .bar {
+    display: inline-block;
+    height: .42rem;
+    background: var(--merge);
+    border-radius: 1px;
+    vertical-align: middle;
+    opacity: .75;
+  }
+  .bar.s { background: var(--split); }
+  .note {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .8rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin: .9rem 0 0;
+  }
+
+  /* ---- pull ---- */
+  .pull {
+    border-left: 3px solid var(--split);
+    padding: .2rem 0 .2rem 1.3rem;
+    margin: 2rem 0;
+    font-size: 1.14rem;
+    line-height: 1.44;
+    color: var(--ink);
+  }
+
+  /* ---- figure ---- */
+  figure { margin: 2rem 0; }
+  figure svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  figcaption {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .82rem;
+    line-height: 1.5;
+    color: var(--muted);
+    margin-top: 1rem;
+    text-align: left;
+  }
+
+  /* ---- code ---- */
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1.05rem 1.2rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: .78rem;
+    line-height: 1.62;
+    margin: 1.4rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .cmt { color: var(--muted); }
+  .key { color: var(--split); }
+
+  /* ---- steps ---- */
+  ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 1.5rem 0; }
+  ol.steps > li {
+    counter-increment: s;
+    position: relative;
+    padding: 0 0 1.2rem 2.6rem;
+    font-size: .97rem;
+  }
+  ol.steps > li::before {
+    content: counter(s);
+    position: absolute;
+    left: 0; top: .12rem;
+    font-family: var(--mono);
+    font-size: .7rem;
+    color: var(--merge);
+    border: 1px solid var(--rule);
+    border-radius: 50%;
+    width: 1.55rem; height: 1.55rem;
+    display: grid; place-items: center;
+  }
+  ol.steps b {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .95rem;
+  }
+
+  ul.plain { list-style: none; padding: 0; margin: 1.2rem 0; }
+  ul.plain > li {
+    padding: .55rem 0 .55rem 1.4rem;
+    border-bottom: 1px solid var(--rule-soft);
+    font-size: .96rem;
+    position: relative;
+  }
+  ul.plain > li::before {
+    content: "";
+    position: absolute; left: 0; top: 1.28em;
+    width: .42rem; height: 1px; background: var(--muted);
+  }
+  ul.plain > li:last-child { border-bottom: none; }
+
+  /* ---- arms ---- */
+  .arms {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 1.6rem 0;
+  }
+  .arm { background: var(--surface); padding: .95rem 1rem; }
+  .arm .id {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    color: var(--split);
+    margin-bottom: .35rem;
+  }
+  .arm .what {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .88rem;
+    line-height: 1.4;
+  }
+  .arm .why {
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    font-size: .76rem;
+    line-height: 1.42;
+    color: var(--muted);
+    margin-top: .35rem;
+  }
+
+  /* ---- sources ---- */
+  .sources { border-top: 2px solid var(--ink); padding-top: 1.6rem; }
+  .srcgroup { margin-bottom: 1.7rem; }
+  .srcgroup h4 {
+    font-family: var(--mono);
+    font-size: .66rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    margin: 0 0 .7rem;
+  }
+  .srcgroup ul { list-style: none; padding: 0; margin: 0; }
+  .srcgroup li {
+    font-size: .87rem;
+    line-height: 1.45;
+    padding: .34rem 0;
+  }
+  .srcgroup li span { color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="kicker">Research memo · Graph construction · mbuzai-rag</p>
+  <h1>Nodes as Senses</h1>
+  <p class="standfirst">Should a knowledge graph node be a string, or a region of embedding space? The literature says yes-but. Four measurements on your own corpus say: not here, not yet, and the thing you'd actually fix first is a two-line NER filter.</p>
+</header>
+
+<section>
+  <p class="eyebrow">The proposal, taken apart</p>
+  <h2>Four claims wearing one coat</h2>
+  <p>"Use embeddings as nodes" bundles four separable proposals. They have wildly different evidence behind them, different implementation costs, and different payoffs on the datasets you're running. Splitting them up is most of the analysis.</p>
+
+  <div class="ledger">
+    <div class="claim">
+      <span class="tag">S</span>
+      <span class="body"><b>Split</b> One surface form, many nodes — <em>Mercury</em> the planet is not <em>Mercury</em> the element.</span>
+      <span class="verdict v-no">Nothing to bite</span>
+    </div>
+    <div class="claim">
+      <span class="tag">M</span>
+      <span class="body"><b>Merge</b> Many surface forms, one node — <em>Obama</em>, <em>Barack Obama</em>, <em>the 44th president</em>.</span>
+      <span class="verdict v-mid">Solved-ish</span>
+    </div>
+    <div class="claim">
+      <span class="tag">L</span>
+      <span class="body"><b>Language-universal</b> The same node for <em>dog</em>, <em>chien</em>, <em>собака</em>, because the encoder already colocates them.</span>
+      <span class="verdict v-mid">Sound, off-thesis</span>
+    </div>
+    <div class="claim">
+      <span class="tag">V</span>
+      <span class="body"><b>No symbols at all</b> The node <em>is</em> a vector; adjacency is nearest-neighbour search at query time.</span>
+      <span class="verdict v-no">Tried, stalled</span>
+    </div>
+  </div>
+
+  <p class="note">Verdicts are argued below, and four of them are argued from measurements on this repo's data rather than from priors. The short version: <b>M</b> is worth about six points of chain connectivity beyond a trivial normaliser; <b>S</b> is the half the field is excited about and the half MuSiQue cannot support, because true lexical polysemy barely occurs there; <b>L</b> is the most intellectually satisfying and the least testable in your current harness; <b>V</b> is a road already walked in 2020–2022. The measurements are the contribution here — the negative ones especially.</p>
+</section>
+
+<section>
+  <p class="eyebrow">Prior art</p>
+  <h2>Yes, and some of it is a decade old</h2>
+
+  <h3>The radical version already exists — it's called a virtual knowledge base</h3>
+  <p><a href="https://arxiv.org/abs/2002.10640">DrKIT</a> (Dhingra et al., ICLR 2020) is claim <b>V</b> executed in full. Every entity <em>mention</em> in the corpus gets a contextual embedding; there are no canonical entity nodes; multi-hop traversal is a sequence of sparse-matrix products interleaved with maximum inner-product search over the mention index. It "softly follows paths of relations between mentions," reports +9 points on 3-hop MetaQA, and runs 10–100× faster than iterative retrievers.</p>
+  <p>The thing worth staring at: <strong>DrKIT's traversal operator and LinearRAG's are the same shape.</strong> Sparse incidence matrix out, dense similarity in the middle, sparse matrix back. Your <code>σ_max</code> gate lives in exactly the slot where DrKIT puts its MIPS call. This is not a coincidence — it's the only efficient way to do soft graph propagation, and both papers found it independently.</p>
+  <p><a href="https://arxiv.org/pdf/2004.07202">Entities as Experts</a> (Févry et al., EMNLP 2020) and <a href="https://openreview.net/forum?id=OY1A8ejQgEX">Mention Memory / TOME</a> (de Jong et al., ICLR 2022) push it further: TOME holds a table of 150M Wikipedia mention encodings and lets transformer layers attend into it. Nodes as embeddings, at scale, six years ago.</p>
+  <p>So why isn't everyone doing this? Because all three need <strong>end-to-end training</strong> of the mention encoder — DrKIT's paper spends significant effort on a pretraining scheme with KB-derived hard negatives — and that conflicts with the drop-in, no-training posture that made RAG win. The line didn't fail on the merits; it got out-competed by "just embed the passage." That's an opening, not a tombstone.</p>
+
+  <h3>The merge half is standard practice, done cheaply</h3>
+  <p><a href="https://arxiv.org/abs/2405.14831">HippoRAG</a> already implements claim <b>M</b> — but as edges rather than identity. Phrase nodes whose embeddings exceed cosine <code>τ = 0.8</code> get an extra <em>synonymy edge</em>; PageRank then flows across it. This is a deliberate hedge: a wrong edge dilutes, a wrong merge is unrecoverable.</p>
+  <p><a href="https://arxiv.org/abs/2510.14271">DEG-RAG</a> (Oct 2025) does the hard version and is the best current evidence for it — the first systematic sweep of blocking strategies, embedding choices, similarity metrics and merge operators for LLM-built KGs. Result: ~40% smaller graph, consistently better QA across several graph-RAG backbones. <a href="https://arxiv.org/abs/1902.00172">CESI</a> (WWW 2018) is the pre-LLM ancestor, clustering noun-phrase embeddings with side information to canonicalise open KBs.</p>
+
+  <h3>The split half is where the field is currently pointing</h3>
+  <p>This is the live one. <a href="https://arxiv.org/html/2606.30093">TIGRAG</a> (June 2026) builds token co-occurrence graphs — nodes are bare tokens, no NER, no LLM extraction — and beats LightRAG, HippoRAG2 and NaiveRAG on HotpotQA / 2Wiki / MuSiQue. Its conclusion names your idea as the next step, verbatim:</p>
+  <div class="pull">"we plan to address the inherent limitations of treating tokens as only lexical units, by introducing semantic-aware nodes to address token polysemy."</div>
+  <p><a href="https://arxiv.org/html/2602.23372">SPRIG</a> arrives at the same place from the other direction: it builds a CPU-only bipartite entity–document graph, admits it does no entity linking or coreference, and patches around ambiguity with a title-alias map, IDF weighting and <code>df(e)^-p</code> hub downweighting. Those patches are the tell — the surface form is doing a job it isn't good enough for.</p>
+  <p><a href="https://arxiv.org/abs/2504.11544">NodeRAG</a> is the closest thing to a counter-argument: it also concluded that one node type per entity is wrong, but solved it by <em>typing</em> nodes (entities, semantic units, attributes, community summaries) rather than by contextualising them. Two roads out of the same complaint.</p>
+
+  <h3>Word sense induction is the thirty-year-old version of "split"</h3>
+  <p>Clustering contextual embeddings of a word to recover its senses is a mature subfield with a discouraging verdict — a 2026 survey is titled, flatly, <a href="https://arxiv.org/pdf/2603.11686">"In the LLM era, Word Sense Induction remains unsolved."</a> Two findings from it matter for your design:</p>
+  <ul class="plain">
+    <li><strong>Word identity dominates sense.</strong> In contextual embedding space, all occurrences of a token cluster tightly together and sense structure is a faint sub-signal inside that cluster. Naive clustering over all mentions recovers the vocabulary, not the senses. Corollary: you must block by surface form and cluster <em>within</em> the block.</li>
+    <li><strong>Anisotropy contaminates the metric.</strong> The top principal components of contextual space encode frequency and position, not meaning. Centre and whiten per-block before you measure any distance.</li>
+  </ul>
+  <p>And the classical warning, which you should take seriously: <a href="https://eprints.whiterose.ac.uk/id/eprint/4922/1/sigir94.pdf">Sanderson (SIGIR 1994)</a> showed that sense disambiguation only helps retrieval above ~90% accuracy, and that 20–30% error is enough to wipe out the gain entirely. Ambiguity mostly hurts <em>short</em> queries; long ones disambiguate themselves. Your sub-questions are short. That cuts both ways — it means the gate is exposed to ambiguity, and it means a sloppy splitter will hurt you.</p>
+
+  <h3>The language-universal claim is better supported than the synonym claim</h3>
+  <p>This is the non-obvious one. Embedding cosine measures <em>distributional relatedness</em>, not <em>referential identity</em>. Within a language that's a serious problem: <em>Obama</em> and <em>Bush</em> sit closer together than <em>Obama</em> and <em>the 44th president</em>, so any threshold loose enough to catch the paraphrase is loose enough to merge the siblings. Across languages the geometry is kinder — translation equivalence is what multilingual encoders like LaBSE are explicitly trained to retrieve, so cross-lingual merging is a better-posed problem than monolingual synonym merging. <a href="https://arxiv.org/pdf/2105.12449">LMMS</a>, SensEmBERT and ARES all exploit exactly this to build multilingual sense inventories over BabelNet synsets; <a href="https://arxiv.org/abs/1611.03954">MTransE</a> and <a href="https://arxiv.org/pdf/2110.08443">Prix-LM</a> are the KG-side lineage.</p>
+</section>
+
+<section>
+  <p class="eyebrow">Measurement</p>
+  <h2>What your corpus actually says</h2>
+  <p>Rather than argue from priors, I measured both halves on <code>data/musique.json</code>. LinearRAG keys an entity node on <code>md5</code> of the exact spaCy span, so two sentences are adjacent only if they contain a byte-identical entity string. That makes both questions concrete.</p>
+
+  <h3>The merge half: how often is the bridge join broken by surface form?</h3>
+  <p>For every gold chain step where sub-question <em>t+1</em> references answer <em>#t</em>, I checked whether that bridge string is lexically present in <em>both</em> the producing and the consuming paragraph.</p>
+
+  <div class="datablock">
+    <p class="cap">Bridge-join availability · MuSiQue · 1,517 joins across 1,000 questions</p>
+    <div class="scroller">
+    <table>
+      <thead><tr><th>What it takes to join</th><th>joins</th><th>share</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>exact — byte-identical</td><td>1,348</td><td>88.9%</td><td><span class="bar" style="width:120px"></span></td></tr>
+        <tr><td>lowercase + strip punct</td><td>74</td><td>4.9%</td><td><span class="bar" style="width:7px"></span></td></tr>
+        <tr class="hi"><td>alias / containment</td><td>53</td><td>3.5%</td><td><span class="bar s" style="width:5px"></span></td></tr>
+        <tr class="hi"><td>true semantic merge</td><td>42</td><td>2.8%</td><td><span class="bar s" style="width:4px"></span></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">Holds across chain length: 91.1% exact at 2 hops, 89.3% at 3, 85.7% at 4. The residue is real but small — <em>the USSR</em> ↔ <em>Warsaw Pact</em>, <em>an American</em> ↔ <em>Household income in the United States</em>.</p>
+  </div>
+
+  <p>So the ceiling on claim <b>M</b> is about <strong>11 points of chain connectivity, of which the cheap normaliser gets nearly half</strong>. A lowercase-and-strip pass — three lines in <code>ner.py</code> — captures 4.9%. Everything an embedding-based merger could add beyond that tops out around 6.3%, and it has to earn that without over-merging. This is a real but modest prize, and it explains why HippoRAG's τ=0.8 synonymy edge was good enough for HippoRAG.</p>
+
+  <h3>The split half: how specific is the join key once you've found it?</h3>
+  <p>An edge that exists but connects to 200 paragraphs carries no information. Approximating spaCy's spans with capitalised multi-word chunks over the 11,656-paragraph corpus:</p>
+
+  <div class="datablock">
+    <p class="cap">Entity-node fan-out · 69,349 distinct spans · MuSiQue corpus</p>
+    <div class="scroller">
+    <table>
+      <thead><tr><th>Paragraphs per node</th><th>nodes</th><th>% of nodes</th><th>% of edge mass</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>59,265</td><td>85.5%</td><td>49.6%</td></tr>
+        <tr><td>2</td><td>5,229</td><td>7.5%</td><td>8.7%</td></tr>
+        <tr><td>3–5</td><td>3,096</td><td>4.5%</td><td>9.3%</td></tr>
+        <tr><td>6–20</td><td>1,399</td><td>2.0%</td><td>11.4%</td></tr>
+        <tr><td>21–100</td><td>312</td><td>0.4%</td><td>9.7%</td></tr>
+        <tr class="hi"><td>101+</td><td>48</td><td>0.1%</td><td>11.3%</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">48 nodes — 0.1% of the graph — carry 11.3% of all incidences. The top of that list: <code>American</code> (1,281), <code>United States</code> (1,010), <code>March</code> (509), <code>September</code> (494), <code>June</code> (470), <code>October</code>, <code>August</code>, <code>November</code>… every month of the year, then <code>French</code>.</p>
+  </div>
+
+  <p>Now the number that matters. How specific is the <em>gold bridge</em> — the join key the chain actually depends on?</p>
+
+  <div class="datablock">
+    <p class="cap">Document frequency of the gold bridge string · n = 1,517</p>
+    <div class="scroller">
+    <table>
+      <thead><tr><th>statistic</th><th>value</th><th>bridges above</th><th>share</th></tr></thead>
+      <tbody>
+        <tr><td>median</td><td>5</td><td>&gt; 1 paragraph</td><td>78.2%</td></tr>
+        <tr><td>mean</td><td>13.4</td><td>&gt; 5 paragraphs</td><td>45.8%</td></tr>
+        <tr class="hi"><td>p90</td><td>42</td><td>&gt; 20 paragraphs</td><td>21.0%</td></tr>
+        <tr><td>p99 / max</td><td>112 / 183</td><td>&gt; 100 paragraphs</td><td>1.6%</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="pull">The bridge is nearly always findable — and nearly half the time it is useless as a join key. The median gold bridge fans out to five paragraphs; the 90th percentile fans out to forty-two.</div>
+
+  <p>That looks like a mandate for splitting. It is not, and the next two measurements are why.</p>
+
+  <h3>Why the fan-out exists — and it isn't polysemy</h3>
+  <p>Fan-out has three possible causes, and they call for three different fixes: <em>genuine polysemy</em> (wants sense splitting), <em>one referent discussed everywhere</em> (wants IDF weighting), and <em>spans that should never have been nodes</em> (wants a type filter). Classifying the 101+ band settles it:</p>
+
+  <div class="datablock">
+    <p class="cap">Composition of the hub bands · MuSiQue corpus · 121,486 incidences</p>
+    <div class="scroller">
+    <table>
+      <thead><tr><th>Fan-out band</th><th>nodes</th><th>mass</th><th>DATE</th><th>NORP</th><th>junk share</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td>101+</td><td>48</td><td>13,514</td><td>5,481</td><td>3,108</td><td>63.6%</td></tr>
+        <tr><td>21–100</td><td>326</td><td>12,240</td><td>28</td><td>1,408</td><td>11.7%</td></tr>
+        <tr><td>6–20</td><td>1,429</td><td>13,881</td><td>85</td><td>96</td><td>1.3%</td></tr>
+        <tr><td>1–5</td><td>68,353</td><td>81,851</td><td>0</td><td>0</td><td>0.0%</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">Nearly two thirds of the worst band is dates and nationalities. Across the whole graph, <strong>63 nodes — 0.09% of the vocabulary — carry 8.4% of all edge mass</strong>, and they are: every month of the year, <code>American</code>, <code>French</code>, <code>British</code>, <code>English</code>, <code>German</code>. LinearRAG's filter drops only <code>ORDINAL</code> and <code>CARDINAL</code>; spaCy tags months <code>DATE</code> and nationalities <code>NORP</code>, so both survive into the graph.</p>
+  </div>
+
+  <h3>Is there any polysemy to split?</h3>
+  <p>Wikipedia hands you free referent labels: a title with a parenthetical disambiguator is an explicit statement that this surface form denotes more than one thing. Counting heads that map to multiple distinct articles:</p>
+
+  <div class="datablock">
+    <p class="cap">Surface forms denoting more than one referent · by corpus</p>
+    <div class="scroller">
+    <table>
+      <thead><tr><th>corpus</th><th>titles</th><th>with (disambig.)</th><th>ambiguous heads</th><th>articles</th></tr></thead>
+      <tbody>
+        <tr><td>MuSiQue</td><td>9,838</td><td>1,017</td><td>54</td><td>119</td></tr>
+        <tr><td>2WikiMultiHopQA</td><td>6,119</td><td>881</td><td>89</td><td>202</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">And most of MuSiQue's 54 are not homonyms at all — they are facets of one work: <code>American Idol (season 1)</code> vs <code>(season 16)</code>, <code>Back to the Future</code> vs <code>(franchise)</code> vs <code>(soundtrack)</code>. Genuine homonymy is a handful of cases (<code>Australia</code> the country / the film / the continent). 2Wiki is materially better — four distinct <em>Picture of Dorian Gray</em> films, three different Archduchesses Maria Theresa separated only by date ranges.</p>
+  </div>
+
+  <div class="pull">Fan-out is real; polysemy is not what causes it. Two thirds of the worst band is NER type junk, and the remainder is overwhelmingly one referent discussed in many paragraphs — the case where splitting is actively wrong.</div>
+
+  <p>So the honest ordering on this data is the reverse of where the field's excitement points. The cheap fix — dropping <code>DATE</code>, <code>NORP</code>, <code>TIME</code>, <code>PERCENT</code>, <code>MONEY</code>, <code>QUANTITY</code> from the node set, two lines in <code>ner.py</code> — removes 63.6% of the worst hub mass. What remains is legitimate high-frequency entities, and the textbook treatment for those is IDF weighting or <code>df(e)^-p</code> downweighting, which is exactly what SPRIG already does. Sense modelling is the third thing to reach for, not the first.</p>
+</section>
+
+<section>
+  <p class="eyebrow">Reframing</p>
+  <h2>Don't split the node. Make it route.</h2>
+  <p>The measurements above rule out hard partitioning, and they also rule out the obvious soft version. Consider the two cases the kernel must separate, both of which have <em>low topical similarity</em>:</p>
+  <ul class="plain">
+    <li><code>Maradona</code>@Barcelona ↔ <code>Maradona</code>@Napoli — same referent, <strong>must stay connected</strong>.</li>
+    <li><code>Mercury</code>@planet ↔ <code>Mercury</code>@record-label — different referent, <strong>must be severed</strong>.</li>
+  </ul>
+  <p>No sentence-context embedding separates those, because both pairs are topically distant. Worse, weighting the transfer by contextual similarity would suppress the first case — and the first case <em>is the multi-hop chain</em>. A bridge sentence and its answer sentence are dissimilar by construction; that is the premise of the σ_max work. A naively contextual kernel would attenuate exactly the hops the gate exists to enable.</p>
+  <p>Two attempts to find an intrinsic signal that separates them failed on this corpus. Schütze-style second-order context vectors — the founding word-sense-induction method, an IDF-weighted bag of the co-occurring entities — produced a separation statistic with median 0.998, saturated and therefore meaningless: exact-span neighbourhoods are too sparse for any pair of paragraphs to overlap, so every 2-way split looks perfect. And the silver labels needed to grade a better attempt don't exist at scale, per the disambiguator count above.</p>
+  <p>So the way out is not a better <code>mᵢ</code>. It is to stop trying to freeze meaning at index time. Meaning depends on context — which means the corpus cannot answer <em>which Mercury</em> on its own, and does not have to. <strong>At retrieval time the question already says which one.</strong> Keep the entity node whole, and make the transfer through it conditional on the active query set: the node stops <strong>broadcasting</strong> and starts <strong>routing</strong>, with the routing weight supplied by the sub-questions you already generate.</p>
+
+  <figure>
+    <svg viewBox="0 0 880 330" role="img" aria-label="Left: a binary entity node passes activation from one sentence equally to all three sentences mentioning Mercury. Right: the same node holds one embedding per mention, and passes activation weighted by mention similarity, so only the planet sense receives it.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0F6E62"/>
+        </marker>
+      </defs>
+
+      <!-- panel labels -->
+      <text x="20" y="20" font-family="ui-monospace, monospace" font-size="11" letter-spacing="1.4" fill="currentColor" opacity=".55">NOW — M IS BINARY</text>
+      <text x="480" y="20" font-family="ui-monospace, monospace" font-size="11" letter-spacing="1.4" fill="#0F6E62">PROPOSED — M IS A KERNEL</text>
+      <line x1="440" y1="34" x2="440" y2="310" stroke="currentColor" stroke-opacity=".16" stroke-dasharray="3 5"/>
+
+      <!-- ================= LEFT ================= -->
+      <rect x="90" y="42" width="250" height="34" rx="3" fill="none" stroke="currentColor" stroke-opacity=".5"/>
+      <text x="215" y="64" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor">s₁ · “…Mercury’s orbit…”</text>
+      <line x1="215" y1="76" x2="215" y2="112" stroke="currentColor" stroke-opacity=".5" marker-end="url(#ah)"/>
+      <circle cx="215" cy="142" r="30" fill="none" stroke="currentColor" stroke-opacity=".7"/>
+      <text x="215" y="146" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="currentColor">Mercury</text>
+      <text x="215" y="192" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".55">one node · fan-out 3</text>
+
+      <line x1="196" y1="167" x2="80" y2="228" stroke="currentColor" stroke-opacity=".65" stroke-width="2" marker-end="url(#ah)"/>
+      <line x1="215" y1="172" x2="215" y2="228" stroke="currentColor" stroke-opacity=".65" stroke-width="2" marker-end="url(#ah)"/>
+      <line x1="234" y1="167" x2="350" y2="228" stroke="currentColor" stroke-opacity=".65" stroke-width="2" marker-end="url(#ah)"/>
+
+      <rect x="20" y="236" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity=".35"/>
+      <text x="80" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor">s₂ · planet</text>
+      <text x="80" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".55">wanted</text>
+      <rect x="155" y="236" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity=".35"/>
+      <text x="215" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor">s₃ · element</text>
+      <text x="215" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".55">leak</text>
+      <rect x="290" y="236" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity=".35"/>
+      <text x="350" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor">s₄ · record label</text>
+      <text x="350" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".55">leak</text>
+
+      <text x="215" y="312" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="currentColor" opacity=".7">equal weight to all — σ cannot undo this</text>
+
+      <!-- ================= RIGHT ================= -->
+      <rect x="530" y="42" width="250" height="34" rx="3" fill="none" stroke="currentColor" stroke-opacity=".5"/>
+      <text x="655" y="64" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" fill="currentColor">s₁ · “…Mercury’s orbit…”</text>
+      <line x1="655" y1="76" x2="655" y2="106" stroke="#0F6E62" marker-end="url(#ahm)"/>
+
+      <rect x="580" y="112" width="150" height="60" rx="4" fill="none" stroke="#0F6E62" stroke-opacity=".85"/>
+      <text x="655" y="128" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#0F6E62">Mercury</text>
+      <!-- mention dots: m1 & m2 close, m3 & m4 far -->
+      <circle cx="616" cy="150" r="4.5" fill="#0F6E62"/>
+      <text x="616" y="167" text-anchor="middle" font-family="ui-monospace, monospace" font-size="8.5" fill="#0F6E62">m₁</text>
+      <circle cx="632" cy="145" r="4.5" fill="#0F6E62"/>
+      <text x="632" y="136" text-anchor="middle" font-family="ui-monospace, monospace" font-size="8.5" fill="#0F6E62">m₂</text>
+      <circle cx="683" cy="156" r="4.5" fill="currentColor" opacity=".45"/>
+      <text x="683" y="168" text-anchor="middle" font-family="ui-monospace, monospace" font-size="8.5" fill="currentColor" opacity=".55">m₃</text>
+      <circle cx="710" cy="140" r="4.5" fill="currentColor" opacity=".45"/>
+      <text x="710" y="132" text-anchor="middle" font-family="ui-monospace, monospace" font-size="8.5" fill="currentColor" opacity=".55">m₄</text>
+
+      <text x="655" y="192" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#0F6E62">one node · per-mention transfer</text>
+
+      <line x1="620" y1="172" x2="520" y2="228" stroke="#0F6E62" stroke-width="3" marker-end="url(#ahm)"/>
+      <line x1="655" y1="176" x2="655" y2="228" stroke="currentColor" stroke-opacity=".25" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#ah)"/>
+      <line x1="692" y1="172" x2="790" y2="228" stroke="currentColor" stroke-opacity=".25" stroke-width="1" stroke-dasharray="3 4" marker-end="url(#ah)"/>
+
+      <rect x="460" y="236" width="120" height="52" rx="3" fill="none" stroke="#0F6E62" stroke-opacity=".6"/>
+      <text x="520" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#0F6E62">s₂ · planet</text>
+      <text x="520" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#0F6E62" opacity=".8">matches q₂</text>
+      <rect x="595" y="236" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity=".2"/>
+      <text x="655" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".5">s₃ · element</text>
+      <text x="655" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".5">no match</text>
+      <rect x="730" y="236" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-opacity=".2"/>
+      <text x="790" y="257" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".5">s₄ · label</text>
+      <text x="790" y="273" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="currentColor" opacity=".5">no match</text>
+
+      <text x="655" y="312" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10.5" fill="#0F6E62">weight = match to the active sub-question — no sense inventory</text>
+    </svg>
+    <figcaption><strong>The node stays whole; the transfer becomes conditional.</strong> Hard sense-splitting would cut <em>Mercury</em> into three nodes and permanently sever any chain that legitimately crosses senses. Attaching one contextual vector per mention and weighting the sentence-to-sentence transfer by <code>cos(mᵢ, mⱼ)</code> gets the same routing behaviour continuously — and recovers the current binary graph exactly when the weights are flattened.</figcaption>
+  </figure>
+
+  <p>This also settles a design question the literature keeps stumbling over. If you make nodes into embeddings <em>and</em> edges into nearest-neighbour similarity, you have reinvented dense retrieval with extra steps — the whole value of a graph is that adjacency encodes <strong>co-occurrence</strong>, which is non-metric and not recoverable from the embedding space. So: <strong>keep edges structural, make only the transfer semantic.</strong></p>
+</section>
+
+<section>
+  <p class="eyebrow">The change</p>
+  <h2>What this looks like in LinearRAG</h2>
+
+  <p>Today the propagation is, with <code>a</code> over entities, <code>M ∈ {0,1}<sup>|S|×|E|</sup></code>, and a single collapsed gate:</p>
+  <pre><code>σ_max = MAX_j sim(q_j, ·)                    <span class="cmt"># collapse the query set FIRST</span>
+a<sup>t</sup>    = MAX( Mᵀ ( σ_max ⊙ (M a<sup>t-1</sup>) ), a<sup>t-1</sup> )   <span class="cmt"># then propagate once</span></code></pre>
+
+  <p>That collapse is where the fan-out damage happens, and it is unrelated to node identity. Once <code>σ_max</code> is a single vector, every sub-question's relevance is pooled into one conductance map — so a hub entity conducts activation opened by <em>q₁</em> into sentences that were only ever relevant to <em>q₃</em>. The sub-questions cross-contaminate each other's paths. Reversing the order fixes it:</p>
+
+  <pre><code><span class="cmt"># one propagation per sub-question; collapse at the END, not the start</span>
+<span class="key">for j in range(m):</span>
+    σ_j = sim(q_j, ·)
+    a_j = MAX( Mᵀ ( σ_j ⊙ (M a_j) ), a_j )   <span class="cmt"># independent branch</span>
+<span class="key">score = MAX_j a_j</span>                          <span class="cmt"># max over branches, over entities</span></code></pre>
+
+  <p>This is the whole change, and it needs no mention vectors, no sense inventory, no thresholds, and no new signal of any kind. It gets the routing behaviour the diagram shows — a hub still conducts, but only within one sub-question's branch, so <em>Mercury</em>-the-planet activation cannot arrive at a record-label sentence unless some sub-question is actually about record labels.</p>
+
+  <ul class="plain">
+    <li><strong>It keeps your floor argument.</strong> <code>q₀</code> is the original question, so branch 0 <em>is</em> vanilla LinearRAG, and the final max is over a set containing it. Still cannot score below vanilla by construction — the same property <code>gate.py</code> is built around.</li>
+    <li><strong>It is strictly more expressive than the current σ_max.</strong> Pooling the gate first is a lossy projection of this; you can recover the current arm by pooling, so one binary serves both.</li>
+    <li><strong>Cost is m× propagation, not m× encoding.</strong> The embeddings, the graph, and <code>M</code> are shared; only the sparse products repeat, and they batch — the m branches are independent columns of one matrix product. On MuSiQue m is typically 2–4.</li>
+  </ul>
+
+  <h3>What this does not need</h3>
+  <p>Notably absent: the mention layer, <code>V Vᵀ</code>, and every clustering decision. The measurements are what removed them. If you want the sense-aware version later, it slots into the same operator as a per-branch mask, and the right corpus to try it on is 2Wiki, not MuSiQue.</p>
+
+  <h3>And the merge half, if you want it</h3>
+  <p>Merging stays orthogonal and cheap: union-find over surface forms, with candidates from <em>containment and acronym rules</em> rather than raw cosine. The measurement says the semantic residue beyond normalisation is 6.3%, and a cosine threshold loose enough to catch it will merge siblings — <em>Obama</em> and <em>Bush</em> sit closer in embedding space than <em>Obama</em> and <em>the 44th president</em>. Require corroboration if you do it at all: two forms merge only if they already share a graph neighbour.</p>
+</section>
+
+<section>
+  <p class="eyebrow">Experiment</p>
+  <h2>How to find out cheaply</h2>
+
+  <p>The diagnostics are done and they redirected the work, which is what diagnostics are for. What remains is four arms on the existing matrix, ordered cheapest-first, all reusing <code>dataio</code>, <code>metrics</code> and the current gate patch.</p>
+
+  <div class="arms">
+    <div class="arm"><div class="id">G0</div><div class="what">Vanilla</div><div class="why">Surface hash, pooled σ_q. The floor.</div></div>
+    <div class="arm"><div class="id">G1</div><div class="what">Type filter</div><div class="why">Drop DATE / NORP / TIME / PERCENT / MONEY / QUANTITY. Two lines; removes 63.6% of hub mass.</div></div>
+    <div class="arm"><div class="id">G2</div><div class="what">Normalise + alias</div><div class="why">lower + strip punct, then containment union-find. Caps at ~11%.</div></div>
+    <div class="arm"><div class="id">G3</div><div class="what">Per-branch propagation</div><div class="why">One pass per sub-question, max at the end. The proposal.</div></div>
+  </div>
+
+  <p>Cross G1–G3 with <code>σ_q</code> and <code>σ_max</code>. The prediction worth committing to in advance: <strong>G1 and G3 attack the same measured problem — hub fan-out — by different routes, so they should <em>not</em> be additive.</strong> If G1 alone captures most of G3's margin, the honest conclusion is that LinearRAG's hub problem is a NER configuration bug and the operator change is unnecessary. That is a perfectly good result and it belongs in the paper either way.</p>
+
+  <p>Two diagnostics to log alongside recall@k, because they explain <em>why</em> rather than <em>whether</em>: <strong>bridge-join rate</strong> (fraction of gold chains whose bridge lands in a shared node — 88.9% at baseline, so there is only 11 points of room and you should see it saturate) and <strong>activation purity</strong> (share of propagated mass reaching gold vs. distractor passages, per hop). Purity is where G1 and G3 should move first, and it will move well before recall@k does.</p>
+
+  <p class="note">One environment note: every measurement in this memo used a capitalised-span regex as a stand-in for spaCy, because spaCy is not installed in the <code>mbuzai</code> env. The fan-out and bridge-join numbers are robust to that — they concern string identity, not span boundaries — but the arms above need faithful NER to reproduce LinearRAG's node set, so <code>spacy</code> + <code>en_core_web_sm</code> should go into the <code>mbuzai</code> env before G1 is run.</p>
+</section>
+
+<section>
+  <p class="eyebrow">Assessment</p>
+  <h2>Is it promising?</h2>
+
+  <p>As a research direction in general: yes. As something to build on <em>this</em> corpus for <em>this</em> paper: no, and the measurements are unusually clear about it.</p>
+
+  <p>The idea is sound and the field agrees — TIGRAG names it as their next step, SPRIG's limitations section circles it, and the virtual-KB line built it three times. But every route into it on MuSiQue is blocked by the same finding: <strong>the conditions the idea needs are not present in the data.</strong> Merging has ~6% of headroom past a trivial normaliser. Splitting needs polysemy, and 54 ambiguous heads out of 9,838 titles — most of them season numbers rather than homonyms — is not enough to move a retrieval metric. The fan-out that looked like a mandate for sense modelling turned out to be 63.6% dates and nationalities.</p>
+
+  <p>Three of the four diagnostics came back negative, and that is worth more than the memo I would have written if they hadn't. It converts "here is a promising direction" into "here is a two-line fix that captures most of the available gain, and here is why the sophisticated version has nothing to work with." Both halves are publishable; the second half is the kind of negative result the graph-RAG literature is conspicuously missing, since TIGRAG and SPRIG are both proposing to walk into it.</p>
+
+  <p>What survives intact is the reformulation: <strong>don't freeze meaning at index time, because you can't — resolve it at query time, where the question already disambiguates.</strong> That drops out as per-branch propagation, which needs no sense inventory at all and is a direct extension of the σ_max thesis rather than a second axis bolted onto it.</p>
+
+  <p>The language-universal property is real, follows for free from a multilingual encoder, and is better-posed than monolingual synonymy — translation equivalence is what LaBSE-class encoders are trained to retrieve, whereas cosine within a language conflates relatedness with identity. But MuSiQue and 2Wiki are monolingual and no established multi-hop retrieval benchmark would show the gain. It is a separate project with its own dataset construction, and that is a much larger undertaking than it looks.</p>
+
+  <h3>If you want to pursue the split half anyway</h3>
+  <ul class="plain">
+    <li><strong>Change corpus.</strong> 2Wiki has 89 ambiguous heads over 202 articles with genuine homonymy — four <em>Picture of Dorian Gray</em> films, three Archduchesses Maria Theresa separated only by date ranges. Its comparison and bridge-comparison question types are also where entity confusion should actually bite.</li>
+    <li><strong>Get real NER first.</strong> Everything sense-level in this memo is untrustworthy until spaCy replaces the regex proxy; the proxy emitted <code>Listed</code>, <code>Pick</code> and <code>Michael J</code> as entities.</li>
+    <li><strong>Respect Sanderson's bar.</strong> Disambiguation below ~90% accuracy has never paid off in retrieval, and word sense induction has spent thirty years not clearing it — a 2026 survey says so in its title.</li>
+  </ul>
+</section>
+
+<section class="sources">
+  <div class="srcgroup">
+    <h4>Nodes as embeddings — the radical version</h4>
+    <ul>
+      <li><a href="https://arxiv.org/abs/2002.10640">Differentiable Reasoning over a Virtual Knowledge Base</a> <span>· Dhingra et al., ICLR 2020 — mention embeddings as nodes, sparse×MIPS traversal</span></li>
+      <li><a href="https://arxiv.org/pdf/2004.07202">Entities as Experts: Sparse Memory Access with Entity Supervision</a> <span>· Févry et al., EMNLP 2020</span></li>
+      <li><a href="https://openreview.net/forum?id=OY1A8ejQgEX">Mention Memory (TOME)</a> <span>· de Jong et al., ICLR 2022 — 150M mention encodings as an attendable table</span></li>
+      <li><a href="https://proceedings.mlr.press/v139/sun21e/sun21e.pdf">Reasoning Over Virtual Knowledge Bases With Open Predicate Relations</a> <span>· Sun et al., ICML 2021</span></li>
+    </ul>
+  </div>
+  <div class="srcgroup">
+    <h4>Merging — entity resolution in graph RAG</h4>
+    <ul>
+      <li><a href="https://arxiv.org/abs/2405.14831">HippoRAG</a> <span>· Gutiérrez et al., NeurIPS 2024 — synonymy edges at cosine τ = 0.8</span></li>
+      <li><a href="https://arxiv.org/abs/2510.14271">Less is More: Denoising Knowledge Graphs for RAG</a> <span>· Zheng et al., 2025 — ~40% smaller KG, better QA</span></li>
+      <li><a href="https://arxiv.org/abs/1902.00172">CESI: Canonicalizing Open Knowledge Bases using Embeddings and Side Information</a> <span>· Vashishth et al., WWW 2018</span></li>
+    </ul>
+  </div>
+  <div class="srcgroup">
+    <h4>Splitting — where the field is heading</h4>
+    <ul>
+      <li><a href="https://arxiv.org/html/2606.30093">TIGRAG: Efficient RAG via Token Co-occurrence Graphs</a> <span>· 2026 — tokens as nodes; names semantic-aware nodes for polysemy as future work</span></li>
+      <li><a href="https://arxiv.org/html/2602.23372">SPRIG: Linear, CPU-Only Graph Retrieval for Multi-Hop QA</a> <span>· 2026 — alias maps and hub downweighting as ambiguity patches</span></li>
+      <li><a href="https://arxiv.org/abs/2504.11544">NodeRAG: Structuring Graph-based RAG with Heterogeneous Nodes</a> <span>· 2025 — the typed-node alternative</span></li>
+    </ul>
+  </div>
+  <div class="srcgroup">
+    <h4>Why splitting is hard</h4>
+    <ul>
+      <li><a href="https://eprints.whiterose.ac.uk/id/eprint/4922/1/sigir94.pdf">Word Sense Disambiguation and Information Retrieval</a> <span>· Sanderson, SIGIR 1994 — the &gt;90% accuracy threshold</span></li>
+      <li><a href="https://arxiv.org/pdf/2603.11686">In the LLM Era, Word Sense Induction Remains Unsolved</a> <span>· 2026</span></li>
+      <li><a href="https://arxiv.org/pdf/2109.13032">Patterns of Lexical Ambiguity in Contextualised Language Models</a> <span>· 2021</span></li>
+      <li><a href="https://openreview.net/pdf?id=xYGNO86OWDH">Isotropy in the Contextual Embedding Space</a> <span>· cluster-level structure and the frequency-dominated principal components</span></li>
+    </ul>
+  </div>
+  <div class="srcgroup">
+    <h4>Language-universal nodes</h4>
+    <ul>
+      <li><a href="https://arxiv.org/pdf/2105.12449">LMMS Reloaded: Transformer-based Sense Embeddings</a> <span>· Loureiro et al. — with SensEmBERT and ARES, multilingual sense inventories over BabelNet</span></li>
+      <li><a href="https://arxiv.org/abs/1611.03954">MTransE: Multilingual KG Embeddings for Cross-lingual Knowledge Alignment</a> <span>· Chen et al., IJCAI 2017</span></li>
+      <li><a href="https://arxiv.org/pdf/2110.08443">Prix-LM: Pretraining for Multilingual Knowledge Base Construction</a> <span>· 2021</span></li>
+    </ul>
+  </div>
+  <div class="srcgroup">
+    <h4>Adjacent</h4>
+    <ul>
+      <li><a href="https://arxiv.org/pdf/2112.01488">ColBERTv2: Late Interaction</a> <span>· the MaxSim operator — σ_max is late interaction at sub-question granularity</span></li>
+      <li><a href="https://arxiv.org/pdf/2108.00573">MuSiQue: Multihop Questions via Single-hop Question Composition</a> <span>· Trivedi et al., TACL 2022</span></li>
+    </ul>
+  </div>
+  <p class="note">Measurements in this memo were computed on <code>data/musique.json</code> and <code>data/musique_corpus.json</code> in this repo. Bridge-join buckets use the gold <code>question_decomposition</code> chain; fan-out figures approximate spaCy spans with capitalised multi-word chunks and should be treated as an estimate of the shape, not the exact count.</p>
+</section>
+
+</div>
