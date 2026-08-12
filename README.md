@@ -90,8 +90,14 @@ python scripts/make_subq_ablations.py musique      # rows 4 and 5, no API
 python scripts/gen_subq.py musique                 # row 3, needs a GPU
 python scripts/eval_subq.py musique                # compare the sets — Gate B
 
-LLM_MODEL=<served-id> bash scripts/run_qafd_probe.sh   # edge-weight probe
+bash scripts/run_qafd_probe.sh                     # edge-weight probe
 ```
+
+The probe reads `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` / `LOCAL_LLM_API_KEY` if
+they are exported, else probes `:5679`, `:5678`, `:8000` and reads the model id
+from `/models`. That id also selects the index directory (`<save_dir>/<llm>_<emb>`),
+so if the server is now serving something other than what indexed the corpus, set
+`LOCAL_LLM_MODEL` explicitly — the preflight prints the directories it can see.
 
 ### The edge-weight probe
 
