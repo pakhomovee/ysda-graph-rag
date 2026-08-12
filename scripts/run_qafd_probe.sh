@@ -61,6 +61,30 @@ PORTS=${PORTS:-"5679 5678 8000"}  # probed in order when no base URL is set
 # the index, so watch RAM before raising it.
 JOBS=${JOBS:-4}
 ST_DEVICE=${ST_DEVICE:-cpu}   # query encoder; cpu keeps the GPU entirely for vLLM
+
+# The diffusion regime. Three settings jointly decide whether edge weights can
+# influence anything, and this harness ships all three conservative:
+#
+#   ALPHA      injected mass is alpha x total_sink, and total_sink is normalised
+#              to 10 while source weights sum to 1 -- so the excess that actually
+#              propagates is 10(alpha-1). At the shipped 1.5 that is 5 units and
+#              the measured spread is ~87 pushes per question on a 96,920-node
+#              graph: a local expansion, not a diffusion. The paper specifies 50
+#              (490 units), and their own src/retrievers/flow_diffusion.py
+#              defaults to 50 -- only this passage-entity pipeline uses 1.5.
+#   MAXITER    with BATCH_PUSH off this caps pushes per question outright. 500 is
+#              fine for alpha=1.5 (87 used) and truncates alpha=50 (~8700 needed)
+#              into a cut-off diffusion that is not the paper's either.
+#   BATCH_PUSH graph_adapter's own comment: "makes edge weights effective because
+#              each iteration touches all excess nodes' edges, not just one
+#              random node's". Off by default, so routing is sampled one random
+#              excess node at a time.
+#
+# Any null about edge weighting is conditional on these. Defaults reproduce every
+# run so far; the paper's regime is ALPHA=50 MAXITER=20000 BATCH_PUSH=1.
+ALPHA=${ALPHA:-1.5}
+MAXITER=${MAXITER:-500}
+BATCH_PUSH=${BATCH_PUSH:-}
 ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 accum4"}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -177,9 +201,16 @@ echo "    ok: QAFD env has the retrieval-path imports"
 echo "==> oracle gold map"
 $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 
+# Mirror benchmark_runner's regime suffix so the skip check and the stats files
+# agree with the dump it will actually write. printf %g on both sides so 50 and
+# 50.0 do not produce two different names for one regime.
+SUFFIX=""
+[ "$(printf '%g' "$ALPHA")" != "1.5" ] && SUFFIX="${SUFFIX}-a$(printf '%g' "$ALPHA")"
+[ -n "$BATCH_PUSH" ] && SUFFIX="${SUFFIX}-bp"
+
 run_arm () {
     local name=$1; shift
-    local log="$ROOT/out/probe_${OURS}_${name}.log"
+    local log="$ROOT/out/probe_${OURS}_${name}${SUFFIX}.log"
     # By path, NOT `python -m src.passage_entity.benchmark_runner`. The runner
     # sidesteps src/__init__.py — which imports aioboto3 and the rest of the AWS
     # stack — by registering src/* as plain namespace packages in sys.modules
@@ -195,8 +226,12 @@ run_arm () {
         --llm_api_key "$LLM_API_KEY" \
         --embedding_model "$EMB" \
         --retrieval_top_k "$TOPK" \
+        --qafd_alpha "$ALPHA" \
+        --qafd_max_iterations "$MAXITER" \
+        ${BATCH_PUSH:+--batch_push} \
         --skip_qa \
-        --edge_stats_file "$ROOT/out/edgestats_${OURS}_${name}.json" \
+        ${NUM_QUERIES:+--num_queries "$NUM_QUERIES"} \
+        --edge_stats_file "$ROOT/out/edgestats_${OURS}_${name}${SUFFIX}.json" \
         "$@" ) >"$log" 2>&1 \
         && echo "    done: $name" \
         || { echo "    FAILED: $name — see $log" >&2; return 1; }
@@ -221,11 +256,11 @@ arm_flags () {   # arm name -> benchmark_runner flags
     esac
 }
 
-echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE)"
+echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE, alpha=$ALPHA maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
-    dump="$WORKDIR/qafd_${OURS}_${arm}.json"
+    dump="$WORKDIR/qafd_${OURS}_${arm}${SUFFIX}.json"
     if [ -f "$dump" ] && [ -z "${FORCE:-}" ]; then
         echo "    have $(basename "$dump"), skipping (FORCE=1 to rerun)"
     else

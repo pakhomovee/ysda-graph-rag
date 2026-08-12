@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..0a486ef 100644
+index 40ee5b0..47af503 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -252,7 +252,7 @@ index 40ee5b0..0a486ef 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +748,209 @@ def main():
+@@ -647,11 +748,217 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -440,6 +440,14 @@ index 40ee5b0..0a486ef 100644
 +        _arm += "-sink%g" % config.qa_sink_gamma
 +    if config.qa_accum_gamma:
 +        _arm += "-accum%g" % config.qa_accum_gamma
++    # The diffusion regime belongs in the name too. alpha decides how much mass
++    # is injected over what the sinks absorb, and therefore how far anything
++    # propagates at all; a run at the paper's alpha=50 is not the same
++    # experiment as one at this harness's 1.5 and must not overwrite it.
++    if config.qafd_alpha != 1.5:
++        _arm += "-a%g" % config.qafd_alpha
++    if config.batch_push:
++        _arm += "-bp"
 +    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
 +    with open(_dump_path, "w") as _f:
 +        json.dump(_dump, _f)
@@ -462,7 +470,7 @@ index 40ee5b0..0a486ef 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1011,9 @@ def main():
+@@ -712,7 +1019,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
