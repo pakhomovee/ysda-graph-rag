@@ -436,7 +436,11 @@ echo "==> did the weights steer anything? (read this FIRST)"
 $PY_MBUZAI "$ROOT/scripts/report_edge_contrast.py" "$ROOT"/out/edgestats_${OURS}_*.json
 
 echo "==> recall"
-$PY_MBUZAI "$ROOT/scripts/score_qafd.py" $OURS --runs "$WORKDIR"/qafd_${OURS}_*.json
+# Exclude per-shard dumps: they hold a slice of the questions each, and
+# score_qafd intersects across arms, so including them collapses every arm to
+# one shard's worth.
+$PY_MBUZAI "$ROOT/scripts/score_qafd.py" $OURS \
+    --runs $(ls "$WORKDIR"/qafd_${OURS}_*.json | grep -v '\.shard[0-9]*of[0-9]*\.json$')
 
 cat <<'EOF'
 

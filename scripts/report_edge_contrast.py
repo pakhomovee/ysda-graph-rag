@@ -27,6 +27,7 @@ resolved and the arm is vacuous.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -37,14 +38,25 @@ def main():
     ap.add_argument("--baseline", default="vanilla")
     args = ap.parse_args()
 
-    rows = []
+    # Sharded runs write one stats file per shard. Sum them back into one row per
+    # arm, otherwise a 16-shard sweep prints 16 near-identical lines per arm and
+    # the table becomes unreadable.
+    acc = {}
     for p in args.stats:
         try:
             d = json.loads(p.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             print(f"  skipping {p.name}: {exc}")
             continue
-        rows.append((d.get("arm") or p.stem, d))
+        arm = re.sub(r"\.shard\d+of\d+$", "", d.get("arm") or p.stem)
+        a = acc.setdefault(arm, {"cv_sum": 0.0, "cv_n": 0, "pushes": 0,
+                                 "queries": 0, "boosted_edges": 0, "shards": 0})
+        for k in ("cv_sum", "cv_n", "pushes", "queries", "boosted_edges"):
+            a[k] += d.get(k, 0) or 0
+        a["shards"] += 1
+    for a in acc.values():
+        a["routing_cv"] = a["cv_sum"] / a["cv_n"] if a["cv_n"] else None
+    rows = sorted(acc.items())
     if not rows:
         sys.exit("no readable stats files")
 
@@ -52,13 +64,14 @@ def main():
     if base_cv is None:
         print(f"note: no {args.baseline!r} arm here — ratios omitted\n")
 
-    print(f"{'arm':<24}{'routing_cv':>12}{'vs base':>10}{'pushes':>12}"
+    print(f"{'arm':<44}{'routing_cv':>12}{'vs base':>10}{'pushes/q':>11}"
           f"{'queries':>9}{'boosted_edges':>15}")
-    for name, d in sorted(rows):
+    for name, d in rows:
         cv = d.get("routing_cv")
         ratio = (f"{cv / base_cv:>9.2f}x" if cv and base_cv else f"{'-':>10}")
-        print(f"{name:<24}{(f'{cv:.4f}' if cv is not None else '-'):>12}{ratio}"
-              f"{d.get('pushes', 0):>12}{d.get('queries', 0):>9}"
+        q = max(d.get("queries", 0), 1)
+        print(f"{name:<44}{(f'{cv:.4f}' if cv is not None else '-'):>12}{ratio}"
+              f"{d.get('pushes', 0) / q:>11.0f}{d.get('queries', 0):>9}"
               f"{d.get('boosted_edges', 0):>15}")
 
     print("\nread this before reading any recall delta:")
