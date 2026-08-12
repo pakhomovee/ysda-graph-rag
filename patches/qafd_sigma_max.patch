@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..6dab21e 100644
+index 40ee5b0..586b360 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -279,7 +279,7 @@ index 40ee5b0..6dab21e 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +768,219 @@ def main():
+@@ -647,11 +768,225 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -475,6 +475,12 @@ index 40ee5b0..6dab21e 100644
 +        _arm += "-a%g" % config.qafd_alpha
 +    if config.batch_push:
 +        _arm += "-bp"
++    # benchmarks/run.py overrides these two for multihop; the argparse defaults
++    # here are a different configuration and must not share a filename with it.
++    if config.qafd_weight_scheme != "multiply":
++        _arm += "-ws%s" % config.qafd_weight_scheme
++    if config.linking_top_k != 10:
++        _arm += "-ltk%d" % config.linking_top_k
 +    if args.query_shard:
 +        _arm += ".shard%s" % args.query_shard.replace("/", "of")
 +    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
@@ -499,7 +505,7 @@ index 40ee5b0..6dab21e 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1041,9 @@ def main():
+@@ -712,7 +1047,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)

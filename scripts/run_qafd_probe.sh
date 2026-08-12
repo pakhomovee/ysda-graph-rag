@@ -302,20 +302,28 @@ run_arm () {
     done
     while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n || rc=1; done
     [ "$rc" -eq 0 ] || return 1
-    merge_shards "$(dump_stem "$name")" "$SHARDS"
+    # Merge the paths the runner REPORTED, not names rebuilt from its rules.
+    # Reconstructing them has now failed twice -- once on the "vanilla-" prefix,
+    # once on the config suffix -- because the rule lives in benchmark_runner and
+    # every copy of it here is a copy that can drift.
+    local paths
+    paths=$(grep -h "^wrote .*qafd_.*\.json" \
+            "$ROOT"/out/probe_${OURS}_$(dump_stem "$name").shard*of${SHARDS}.log \
+            | awk '{print $2}')
+    [ -n "$paths" ] || { echo "    FATAL: no shard reported a dump path" >&2; return 1; }
+    merge_shards $paths
 }
 
 # Merge one arm's shards. The destination is derived from the shard filenames by
 # removing the .shardIofN segment, so it cannot disagree with what was written.
 merge_shards () {
-    $PY_MBUZAI - "$WORKDIR" "$OURS" "$1" "$2" <<'PYEOF'
-import json, sys, os, glob
-workdir, ds, tag, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-parts = sorted(glob.glob(os.path.join(workdir, f"qafd_{ds}_{tag}.shard*of{n}.json")))
-if len(parts) != n:
-    raise SystemExit(f"FATAL: found {len(parts)} of {n} shards for {tag}.\n"
-                     f"  looked in {workdir}\n"
-                     "  a shard failed, or the arm wrote under a different name")
+    $PY_MBUZAI - "$@" <<'PYEOF'
+import json, sys, os, re
+parts = sys.argv[1:]
+dests = {re.sub(r"\.shard\d+of\d+\.json$", ".json", p) for p in parts}
+if len(dests) != 1:
+    raise SystemExit(f"FATAL: shards disagree on destination: {sorted(dests)}")
+dest = dests.pop()
 merged, seen = {}, 0
 for part in parts:
     with open(part) as f:
@@ -324,10 +332,9 @@ for part in parts:
     merged.update(d)
 if len(merged) != seen:
     raise SystemExit(f"FATAL: shards overlap — {seen} rows collapsed to {len(merged)}")
-dest = os.path.join(workdir, f"qafd_{ds}_{tag}.json")
 with open(dest, "w") as f:
     json.dump(merged, f)
-print(f"    merged {n} shards -> {os.path.basename(dest)} ({len(merged)} questions)")
+print(f"    merged {len(parts)} shards -> {os.path.basename(dest)} ({len(merged)} questions)")
 PYEOF
 }
 
@@ -355,7 +362,11 @@ arm_flags () {   # arm name -> benchmark_runner flags
 if [ -n "${MERGE_ONLY:-}" ]; then
     for arm in $ARMS; do
         echo "    $arm"
-        merge_shards "$(dump_stem "$arm")" "$SHARDS"
+        paths=$(grep -h "^wrote .*qafd_.*\.json" \
+                "$ROOT"/out/probe_${OURS}_$(dump_stem "$arm").shard*of${SHARDS}.log \
+                | awk '{print $2}')
+        [ -n "$paths" ] || { echo "    no shard logs for $arm at SHARDS=$SHARDS" >&2; continue; }
+        merge_shards $paths
     done
     exit 0
 fi
