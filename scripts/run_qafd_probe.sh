@@ -92,6 +92,8 @@ BATCH_PUSH=${BATCH_PUSH:-}
 # more than one core within an arm. Shards are strided, so each covers the same
 # mix of hop depths, and the dumps are merged back into the canonical arm name.
 SHARDS=${SHARDS:-1}
+# MERGE_ONLY=1 re-merges existing shards for ARMS and exits, for when a run
+# completed but the merge did not.
 ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 accum4"}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -216,9 +218,18 @@ SUFFIX=""
 [ -n "$BATCH_PUSH" ] && SUFFIX="${SUFFIX}-bp"
 
 # One shard of one arm.
+# benchmark_runner composes the dump name itself, starting from "vanilla" and
+# appending one suffix per non-default setting, so an arm called oracle1000ent
+# lands in qafd_<ds>_vanilla-oracle1000ent<regime>.json. Reproducing that rule
+# here is what broke the merge; keep ONE definition of it.
+dump_stem () {
+    local name=$1
+    if [ "$name" = vanilla ]; then echo "vanilla${SUFFIX}"; else echo "vanilla-${name}${SUFFIX}"; fi
+}
+
 run_shard () {
     local name=$1 shard=$2; shift 2
-    local tag="${name}${SUFFIX}"
+    local tag; tag=$(dump_stem "$name")
     local log="$ROOT/out/probe_${OURS}_${tag}${shard:+.shard${shard/\//of}}.log"
     # By path, NOT `python -m src.passage_entity.benchmark_runner`. The runner
     # sidesteps src/__init__.py — which imports aioboto3 and the rest of the AWS
@@ -262,12 +273,22 @@ run_arm () {
     done
     while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n || rc=1; done
     [ "$rc" -eq 0 ] || return 1
-    $PY_MBUZAI - "$WORKDIR" "$OURS" "${name}${SUFFIX}" "$SHARDS" <<'PYEOF'
-import json, sys, os
+    merge_shards "$(dump_stem "$name")" "$SHARDS"
+}
+
+# Merge one arm's shards. The destination is derived from the shard filenames by
+# removing the .shardIofN segment, so it cannot disagree with what was written.
+merge_shards () {
+    $PY_MBUZAI - "$WORKDIR" "$OURS" "$1" "$2" <<'PYEOF'
+import json, sys, os, glob
 workdir, ds, tag, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+parts = sorted(glob.glob(os.path.join(workdir, f"qafd_{ds}_{tag}.shard*of{n}.json")))
+if len(parts) != n:
+    raise SystemExit(f"FATAL: found {len(parts)} of {n} shards for {tag}.\n"
+                     f"  looked in {workdir}\n"
+                     "  a shard failed, or the arm wrote under a different name")
 merged, seen = {}, 0
-for i in range(n):
-    part = os.path.join(workdir, f"qafd_{ds}_{tag}.shard{i}of{n}.json")
+for part in parts:
     with open(part) as f:
         d = json.load(f)
     seen += len(d)
@@ -304,13 +325,23 @@ echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE, alpha=$ALPHA maxiter=$MAXI
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
-    dump="$WORKDIR/qafd_${OURS}_${arm}${SUFFIX}.json"
+    dump="$WORKDIR/qafd_${OURS}_$(dump_stem "$arm").json"
     if [ -f "$dump" ] && [ -z "${FORCE:-}" ]; then
         echo "    have $(basename "$dump"), skipping (FORCE=1 to rerun)"
     else
         PENDING+=("$arm")
     fi
 done
+
+# Recover shards whose merge failed: the retrieval is already paid for, so
+# re-running it to fix a filename would be pure waste.
+if [ -n "${MERGE_ONLY:-}" ]; then
+    for arm in $ARMS; do
+        echo "    $arm"
+        merge_shards "$(dump_stem "$arm")" "$SHARDS"
+    done
+    exit 0
+fi
 
 if [ ${#PENDING[@]} -gt 0 ]; then
     echo "    running: ${PENDING[*]}"
