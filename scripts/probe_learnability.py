@@ -93,12 +93,19 @@ def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5
     if not hasattr(model, "_step"):
         return model
     tr = ~val
+    # Build each model's inputs ONCE. The MLP's feature block is
+    # |rows| x (2d+2) floats — at d=768 that is hundreds of MB, and rebuilding it
+    # per epoch made training cost more than everything else in this script put
+    # together. Nothing in it depends on the parameters.
+    ptr = model.prep(he[tr], hq[tr], deg[tr])
+    pva = model.prep(he[val], hq[val], deg[val])
+    ytr, yva = y[tr], y[val]
     st = {}
     best = (-np.inf, [p.copy() for p in model._params()])
     for ep in range(1, epochs + 1):
-        model._step(he[tr], hq[tr], y[tr], deg[tr], st, lr)
+        model._step(ptr, ytr, st, lr)
         if ep % eval_every == 0 or ep == epochs:
-            auc = roc_auc(model.score_rows(he[val], hq[val], deg[val]), y[val])
+            auc = roc_auc(model.score_prepped(pva), yva)
             if auc > best[0]:
                 best = (auc, [p.copy() for p in model._params()])
     for p, b in zip(model._params(), best[1]):
@@ -114,27 +121,27 @@ class Cosine:
     def score(self, he, hq, deg):
         return he @ hq
 
-    def score_rows(self, he, hq, deg):
-        return np.sum(he * hq, axis=1)
-
 
 class Diagonal:
     """h_e^T diag(w) h_q — the smallest strict generalisation of cosine."""
     name = "diagonal"
 
     def __init__(self, d, seed=0):
-        self.w = np.ones(d)     # w = 1 is exactly cosine
-        self.b = np.zeros(1)
+        self.w = np.ones(d, dtype=np.float32)     # w = 1 is exactly cosine
+        self.b = np.zeros(1, dtype=np.float32)
 
     def _params(self):
         return [self.w, self.b]
 
-    def _step(self, he, hq, y, deg, st, lr):
-        _, ds = _logistic_loss_grad((he * hq) @ self.w + self.b, y)
-        _adam(self._params(), [(he * hq).T @ ds, np.array([ds.sum()])], st, lr)
+    def prep(self, he, hq, deg):
+        return he * hq          # the only thing the gradient needs
 
-    def score_rows(self, he, hq, deg):
-        return (he * hq) @ self.w + self.b
+    def _step(self, P, y, st, lr):
+        _, ds = _logistic_loss_grad(P @ self.w + self.b, y)
+        _adam(self._params(), [P.T @ ds, np.array([ds.sum()])], st, lr)
+
+    def score_prepped(self, P):
+        return P @ self.w + self.b
 
     def score(self, he, hq, deg):
         return (he * self.w) @ hq + self.b
@@ -155,23 +162,27 @@ class LowRank:
     def __init__(self, d, r=64, seed=0):
         rng = np.random.default_rng(seed)
         s = 0.01 / np.sqrt(d)
-        self.A = rng.normal(0, s, (d, r))
-        self.B = rng.normal(0, s, (d, r))
-        self.b = np.zeros(1)
+        self.A = rng.normal(0, s, (d, r)).astype(np.float32)
+        self.B = rng.normal(0, s, (d, r)).astype(np.float32)
+        self.b = np.zeros(1, dtype=np.float32)
 
     def _params(self):
         return [self.A, self.B, self.b]
 
-    def _step(self, he, hq, y, deg, st, lr):
+    def prep(self, he, hq, deg):
+        return he, hq, np.sum(he * hq, axis=1)   # cos is fixed; A, B are not
+
+    def _step(self, P, y, st, lr):
+        he, hq, cos = P
         ea, qb = he @ self.A, hq @ self.B
-        _, ds = _logistic_loss_grad(
-            np.sum(he * hq, axis=1) + np.sum(ea * qb, axis=1) + self.b, y)
+        _, ds = _logistic_loss_grad(cos + np.sum(ea * qb, axis=1) + self.b, y)
         _adam(self._params(),
               [he.T @ (ds[:, None] * qb), hq.T @ (ds[:, None] * ea),
                np.array([ds.sum()])], st, lr)
 
-    def score_rows(self, he, hq, deg):
-        return np.sum(he * hq, axis=1) + np.sum((he @ self.A) * (hq @ self.B), axis=1) + self.b
+    def score_prepped(self, P):
+        he, hq, cos = P
+        return cos + np.sum((he @ self.A) * (hq @ self.B), axis=1) + self.b
 
     def score(self, he, hq, deg):
         return he @ hq + (he @ self.A) @ (self.B.T @ hq) + self.b
@@ -189,10 +200,10 @@ class MLP:
     def __init__(self, d, hidden=128, seed=0):
         rng = np.random.default_rng(seed)
         f = 2 * d + 2
-        self.W1 = rng.normal(0, np.sqrt(2.0 / f), (f, hidden))
-        self.b1 = np.zeros(hidden)
-        self.W2 = rng.normal(0, np.sqrt(2.0 / hidden), (hidden, 1))
-        self.b2 = np.zeros(1)
+        self.W1 = rng.normal(0, np.sqrt(2.0 / f), (f, hidden)).astype(np.float32)
+        self.b1 = np.zeros(hidden, dtype=np.float32)
+        self.W2 = rng.normal(0, np.sqrt(2.0 / hidden), (hidden, 1)).astype(np.float32)
+        self.b2 = np.zeros(1, dtype=np.float32)
 
     @staticmethod
     def _feat(he, hq, deg):
@@ -203,20 +214,22 @@ class MLP:
     def _params(self):
         return [self.W1, self.b1, self.W2, self.b2]
 
-    def _step(self, he, hq, y, deg, st, lr):
-        X = self._feat(he, hq, deg)
+    def prep(self, he, hq, deg):
+        return self._feat(he, hq, deg)
+
+    def _step(self, X, y, st, lr):
         h = np.maximum(0, X @ self.W1 + self.b1)
         _, ds = _logistic_loss_grad((h @ self.W2 + self.b2).ravel(), y)
         dh = (ds[:, None] @ self.W2.T) * (h > 0)
         _adam(self._params(),
               [X.T @ dh, dh.sum(0), h.T @ ds[:, None], np.array([ds.sum()])], st, lr)
 
-    def score_rows(self, he, hq, deg):
-        h = np.maximum(0, self._feat(he, hq, deg) @ self.W1 + self.b1)
+    def score_prepped(self, X):
+        h = np.maximum(0, X @ self.W1 + self.b1)
         return (h @ self.W2 + self.b2).ravel()
 
     def score(self, he, hq, deg):
-        return self.score_rows(np.asarray(he), np.broadcast_to(hq, he.shape), deg)
+        return self.score_prepped(self._feat(he, np.broadcast_to(hq, he.shape), deg))
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +280,11 @@ def main():
                  "    bash scripts/export_qafd_nodes.sh")
     z = np.load(npz_path, allow_pickle=False)
 
-    ent_emb = np.asarray(z["entity_emb"], dtype=np.float64)
+    # float32 throughout: the feature blocks are hundreds of MB at d=768 and
+    # nothing here needs float64 precision.
+    ent_emb = np.asarray(z["entity_emb"], dtype=np.float32)
     ent_emb /= np.linalg.norm(ent_emb, axis=1, keepdims=True) + 1e-12
-    ent_deg = z["entity_degree"].astype(np.float64)
+    ent_deg = z["entity_degree"].astype(np.float32)
     n_ent, d = ent_emb.shape
 
     # entity -> gold pids, as sets keyed by pid for a cheap per-question lookup
@@ -308,7 +323,7 @@ def main():
     model = SentenceTransformer(EMB_MODEL, device=args.device)
     q_emb = np.asarray(model.encode([q.question for q in queries],
                                     normalize_embeddings=True, convert_to_numpy=True,
-                                    show_progress_bar=False), dtype=np.float64)
+                                    show_progress_bar=False), dtype=np.float32)
 
     order = rng.permutation(len(queries))
     tr, te = order[:args.train_questions], order[args.train_questions:]
