@@ -274,6 +274,7 @@ dump_stem () {
         # of starting from "vanilla".
         subqedges) echo "edges-generated${SUFFIX}" ;;
         subqseeds) echo "seeds-generated${SUFFIX}" ;;
+        dpr)       echo "vanilla-dpr${SUFFIX}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
     esac
@@ -367,6 +368,7 @@ arm_flags () {   # arm name -> benchmark_runner flags
     local a=$1 mult
     case $a in
         vanilla)   ;;
+        dpr)       printf '%s\n' --retrieval_mode dpr ;;
         # oracle<mult>[ent][seed] — ent drops the gold PASSAGE node (which is also a
         # ranking target) so the arm measures steering rather than mass landing on
         # the answer; seed spends the multiplier on source mass instead of edges.

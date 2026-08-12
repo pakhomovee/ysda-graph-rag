@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..32d24e7 100644
+index 40ee5b0..9588699 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -160,7 +160,7 @@ index 40ee5b0..32d24e7 100644
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,40 @@ def main():
+@@ -426,6 +470,44 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -194,6 +194,10 @@ index 40ee5b0..32d24e7 100644
 +    parser.add_argument("--query_shard", type=str, default=None,
 +                        help="I/N: run only questions I, I+N, I+2N, ... Shards are "
 +                             "independent processes; merge the dumps afterwards")
++    parser.add_argument("--retrieval_mode", type=str, default="qafd",
++                        choices=["qafd", "dpr"],
++                        help="dpr returns QAFD's own dense passage component with the "
++                             "graph skipped, to isolate what the diffusion adds")
 +    parser.add_argument("--export_nodes", type=str, default=None,
 +                        help="dump graph + frozen vectors to this .npz for the offline "
 +                             "learnability probe, then exit before retrieval")
@@ -201,7 +205,7 @@ index 40ee5b0..32d24e7 100644
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +537,14 @@ def main():
+@@ -459,6 +541,15 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -211,12 +215,13 @@ index 40ee5b0..32d24e7 100644
 +        oracle_edge_mult=args.oracle_edge_mult,
 +        oracle_nodes=args.oracle_nodes,
 +        oracle_site=args.oracle_site,
++        retrieval_mode=args.retrieval_mode,
 +        exp_beta=args.exp_beta,
 +        edge_stats_file=args.edge_stats_file,
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +605,8 @@ def main():
+@@ -519,6 +610,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -225,7 +230,7 @@ index 40ee5b0..32d24e7 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +617,9 @@ def main():
+@@ -529,6 +622,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -235,7 +240,7 @@ index 40ee5b0..32d24e7 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -608,6 +699,23 @@ def main():
+@@ -608,6 +704,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -259,7 +264,7 @@ index 40ee5b0..32d24e7 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +734,19 @@ def main():
+@@ -626,6 +739,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -279,7 +284,7 @@ index 40ee5b0..32d24e7 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +768,233 @@ def main():
+@@ -647,11 +773,235 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -484,6 +489,8 @@ index 40ee5b0..32d24e7 100644
 +    # A truncated run is a different experiment and must never land on the full
 +    # run's filename. Without this a --num_queries 100 smoke test silently
 +    # overwrote a completed 1000-question arm.
++    if config.retrieval_mode != "qafd":
++        _arm += "-%s" % config.retrieval_mode
 +    if args.num_queries > 0:
 +        _arm += "-n%d" % args.num_queries
 +    if args.query_shard:
@@ -513,7 +520,7 @@ index 40ee5b0..32d24e7 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1055,9 @@ def main():
+@@ -712,7 +1062,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
@@ -525,10 +532,10 @@ index 40ee5b0..32d24e7 100644
          "graph_type": "passage-entity",
          "dataset": args.dataset,
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
-index d015a39..d00bcb7 100644
+index d015a39..e9916a3 100644
 --- a/src/passage_entity/config.py
 +++ b/src/passage_entity/config.py
-@@ -57,6 +57,19 @@ class PassageEntityConfig:
+@@ -57,6 +57,20 @@ class PassageEntityConfig:
      qafd_random_seed: int = 42
  
      # ── Query-aware enhancements (all default = original behaviour) ────────
@@ -541,6 +548,7 @@ index d015a39..d00bcb7 100644
 +    oracle_edge_mult: float = 1.0           # 1.0 = oracle off
 +    oracle_nodes: str = "all"               # "all" = gold passages + their entities
 +                                            # "entities" = entities only, no passage node
++    retrieval_mode: str = "qafd"   # "dpr" returns the dense component alone
 +    oracle_site: str = "edges"              # "edges" = diffusion weights, "seeds" = source mass
 +    exp_beta: float = 0.0                   # used only by qafd_weight_scheme="exp"
 +    edge_stats_file: Optional[str] = None   # routing-contrast instrumentation dump
@@ -804,7 +812,7 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..638387d 100644
+index e2b2da2..adf999f 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
 @@ -83,6 +83,13 @@ class PassageEntityRetriever:
@@ -898,7 +906,22 @@ index e2b2da2..638387d 100644
          return min_max_normalize(scores)
  
      # ------------------------------------------------------------------
-@@ -308,6 +366,22 @@ class PassageEntityRetriever:
+@@ -297,6 +355,14 @@ class PassageEntityRetriever:
+ 
+         # --- passage seed weights ---
+         dpr_ids, dpr_scores = self._dense_passage_retrieval(query)
++
++        # QAFD contains a dense retriever and then builds a graph on top of it.
++        # Returning that component alone isolates what the graph machinery adds:
++        # same index, same encoder, same passages, everything downstream skipped.
++        # If the full pipeline scores BELOW this, the diffusion is net-harmful
++        # rather than merely underperforming.
++        if getattr(self.config, "retrieval_mode", "qafd") == "dpr":
++            return dpr_ids, dpr_scores
+         norm_dpr = min_max_normalize(dpr_scores)
+         pw = self.config.passage_node_weight
+ 
+@@ -308,6 +374,22 @@ class PassageEntityRetriever:
  
          node_weights = phrase_weights + passage_weights
  
@@ -921,7 +944,7 @@ index e2b2da2..638387d 100644
          if np.sum(node_weights) == 0:
              logger.warning("All node weights are zero after seed selection, falling back to DPR")
              return dpr_ids, dpr_scores
-@@ -322,7 +396,18 @@ class PassageEntityRetriever:
+@@ -322,7 +404,18 @@ class PassageEntityRetriever:
                  if i < len(self.passage_embeddings):
                      self._node_emb_dict[nk] = self.passage_embeddings[i]
  
@@ -941,7 +964,7 @@ index e2b2da2..638387d 100644
  
          # --- Run QAFD ---
          qafd_start = time.time()
-@@ -348,6 +433,10 @@ class PassageEntityRetriever:
+@@ -348,6 +441,10 @@ class PassageEntityRetriever:
              qa_accum_gamma=self.config.qa_accum_gamma,
              qa_post_lambda=self.config.qa_post_lambda,
              batch_push=self.config.batch_push,
