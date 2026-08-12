@@ -441,7 +441,10 @@ echo "==> recall"
 # Exclude per-shard dumps: they hold a slice of the questions each, and
 # score_qafd intersects across arms, so including them collapses every arm to
 # one shard's worth.
+# Baseline follows the active config: at PROFILE=paper the comparable vanilla is
+# vanilla-a2-wsoriginal-ltk5, not the bare "vanilla" score_qafd defaults to.
 $PY_MBUZAI "$ROOT/scripts/score_qafd.py" $OURS \
+    --baseline "$(dump_stem vanilla)" \
     --runs $(ls "$WORKDIR"/qafd_${OURS}_*.json | grep -v '\.shard[0-9]*of[0-9]*\.json$')
 
 cat <<'EOF'
