@@ -80,7 +80,8 @@ def arm_name(subq_path, args=None):
     stem = os.path.splitext(os.path.basename(subq_path))[0]
     if stem.endswith("_bytext"):
         stem = stem[: -len("_bytext")]
-    for tag in ("generated", "resolved", "raw"):
+    for tag in ("generated", "resolved", "raw", "viewsshuf",
+                "views2", "views3", "views4", "views6", "views"):
         if stem.endswith(tag):
             break
     else:
