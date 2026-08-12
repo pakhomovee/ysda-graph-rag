@@ -99,6 +99,30 @@ def _clean(s: str) -> str:
     return s.strip(" ,.?!;:").strip()
 
 
+def _dedup(views: list[str], overlap: float = 0.8) -> list[str]:
+    """Drop near-duplicates, not just exact repeats.
+
+    Nested fragments survive exact-match dedup — "was the region immediately
+    north of the region" and "was the region immediately north" are two slots
+    spent on one view. With a budget of three that is a third of it wasted, and
+    the budget is the whole point.
+    """
+    kept: list[str] = []
+    for v in views:
+        tv = set(re.findall(r"[a-z0-9']+", v.lower())) - STOP
+        if not tv:
+            continue
+        dup = False
+        for k in kept[1:]:                      # never drop view 0, the question
+            tk = set(re.findall(r"[a-z0-9']+", k.lower())) - STOP
+            if tk and len(tv & tk) / min(len(tv), len(tk)) >= overlap:
+                dup = True
+                break
+        if not dup:
+            kept.append(v)
+    return kept
+
+
 def views_regex(question: str, min_words: int, max_views: int) -> list[str]:
     """Clause and entity views from surface patterns. No parser, no model."""
     out = [question]
@@ -127,7 +151,7 @@ def views_regex(question: str, min_words: int, max_views: int) -> list[str]:
         if k not in seen:
             seen.add(k)
             uniq.append(v)
-    return uniq[:max_views]
+    return _dedup(uniq)[:max_views]
 
 
 def views_spacy(nlp, question: str, min_words: int, max_views: int) -> list[str]:
@@ -164,7 +188,7 @@ def views_spacy(nlp, question: str, min_words: int, max_views: int) -> list[str]
         if k not in seen:
             seen.add(k)
             uniq.append(v)
-    return uniq[:max_views]
+    return _dedup(uniq)[:max_views]
 
 
 def main():
