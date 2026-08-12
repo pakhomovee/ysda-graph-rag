@@ -50,6 +50,12 @@ grep -q "subq_scope" "$SUB/src/passage_entity/config.py"       && echo "    conf
 grep -q "_query_matrix" "$SUB/src/passage_entity/retriever.py" && echo "    retriever builds the query set"
 grep -q "def _oracle" "$SUB/src/passage_entity/graph_adapter.py" && echo "    edge-weight probe: oracle + exp scheme"
 grep -q "oracle_gold_file" "$SUB/src/passage_entity/config.py"   && echo "    config exposes the probe flags"
+grep -q "oracle_site" "$SUB/src/passage_entity/config.py" \
+    && echo "    oracle scopes: --oracle_nodes / --oracle_site" \
+    || { echo "    FATAL: patch predates the oracle scopes — stale working tree" >&2; exit 1; }
+grep -q "export_nodes" "$SUB/src/passage_entity/benchmark_runner.py" \
+    && echo "    offline-probe export: --export_nodes" \
+    || { echo "    FATAL: patch predates --export_nodes — stale working tree" >&2; exit 1; }
 grep -q '"mpnet"' "$SUB/src/passage_entity/benchmark_runner.py" \
     && echo "    mpnet encoder registered" \
     || { echo "    FATAL: encoder missing — stale patch in the working tree" >&2; exit 1; }

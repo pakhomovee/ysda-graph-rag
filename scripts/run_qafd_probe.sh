@@ -69,8 +69,29 @@ ORACLE="$ROOT/out/qafd_oracle_${OURS}.json"
 
 echo "==> preflight"
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
-grep -q "_oracle" "$SUB/src/passage_entity/graph_adapter.py" \
-    || { echo "QAFD is not patched for the probe — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
+require_flags () {
+    # Ask the runner what it actually accepts, rather than grepping for a marker.
+    # A marker proves *some* version of the patch is applied; `git pull` updates
+    # patches/qafd_sigma_max.patch but NOT the submodule working tree it applies
+    # to, so a stale tree passes any fixed marker check and then dies on argparse
+    # tens of minutes in — or, in a parallel sweep, on every arm at once.
+    local help_text
+    help_text=$( cd "$SUB" && $PY src/passage_entity/benchmark_runner.py --help 2>&1 ) || {
+        echo "benchmark_runner.py --help failed:" >&2; echo "$help_text" | tail -5 >&2; exit 1; }
+    for f in "$@"; do
+        case "$help_text" in
+            *"$f"*) ;;
+            *) cat >&2 <<EOF
+benchmark_runner.py does not accept $f — the submodule has a stale patch.
+  git pull updates patches/qafd_sigma_max.patch; it does not reapply it.
+  Fix:  bash scripts/setup_qafd.sh
+EOF
+               exit 1 ;;
+        esac
+    done
+}
+require_flags --oracle_gold_file --oracle_edge_mult --oracle_nodes --oracle_site \
+              --exp_beta --edge_stats_file
 # The fact reranker runs inside the retrieval loop and swallows every exception
 # (reranker.py: "except Exception ... generated_facts = []"). An unreachable
 # server therefore does not fail the run — it silently drops reranking from all

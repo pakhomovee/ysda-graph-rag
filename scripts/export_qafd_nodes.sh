@@ -28,6 +28,21 @@ SUB="$ROOT/third_party/QAFD-RAG"
 DEST="$ROOT/out/qafd_nodes_${OURS}.npz"
 
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
+
+# Check the flag exists before doing any work. `git pull` updates the patch file
+# but does not reapply it to the submodule working tree, so a stale tree fails
+# here on argparse — after the index has already been loaded.
+_help=$( cd "$SUB" && $PY src/passage_entity/benchmark_runner.py --help 2>&1 ) || {
+    echo "benchmark_runner.py --help failed:" >&2; echo "$_help" | tail -5 >&2; exit 1; }
+case "$_help" in
+    *--export_nodes*) ;;
+    *) cat >&2 <<'EOF'
+benchmark_runner.py does not accept --export_nodes — the submodule has a stale patch.
+  git pull updates patches/qafd_sigma_max.patch; it does not reapply it.
+  Fix:  bash scripts/setup_qafd.sh
+EOF
+       exit 1 ;;
+esac
 [ -n "$LLM_MODEL" ] || { cat >&2 <<'EOF'
 set LOCAL_LLM_MODEL (or LLM_MODEL) to the id the index was built with. No server is
 contacted here, but working_dir is derived as <save_dir>/<llm>_<emb>, so the value
