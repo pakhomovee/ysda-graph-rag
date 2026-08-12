@@ -321,6 +321,16 @@ arm_flags () {   # arm name -> benchmark_runner flags
     esac
 }
 
+# Recover shards whose merge failed: the retrieval is already paid for, so
+# re-running it to fix a filename would be pure waste.
+if [ -n "${MERGE_ONLY:-}" ]; then
+    for arm in $ARMS; do
+        echo "    $arm"
+        merge_shards "$(dump_stem "$arm")" "$SHARDS"
+    done
+    exit 0
+fi
+
 echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE, alpha=$ALPHA maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
@@ -332,16 +342,6 @@ for arm in $ARMS; do
         PENDING+=("$arm")
     fi
 done
-
-# Recover shards whose merge failed: the retrieval is already paid for, so
-# re-running it to fix a filename would be pure waste.
-if [ -n "${MERGE_ONLY:-}" ]; then
-    for arm in $ARMS; do
-        echo "    $arm"
-        merge_shards "$(dump_stem "$arm")" "$SHARDS"
-    done
-    exit 0
-fi
 
 if [ ${#PENDING[@]} -gt 0 ]; then
     echo "    running: ${PENDING[*]}"
