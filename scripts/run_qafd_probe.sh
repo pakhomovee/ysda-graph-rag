@@ -309,7 +309,7 @@ run_arm () {
     local paths
     paths=$(grep -h "^wrote .*qafd_.*\.json" \
             "$ROOT"/out/probe_${OURS}_$(dump_stem "$name").shard*of${SHARDS}.log \
-            | awk '{print $2}')
+            | awk -v base="$SUB" '{ print ($2 ~ /^\//) ? $2 : base "/" $2 }')
     [ -n "$paths" ] || { echo "    FATAL: no shard reported a dump path" >&2; return 1; }
     merge_shards $paths
 }
@@ -364,7 +364,7 @@ if [ -n "${MERGE_ONLY:-}" ]; then
         echo "    $arm"
         paths=$(grep -h "^wrote .*qafd_.*\.json" \
                 "$ROOT"/out/probe_${OURS}_$(dump_stem "$arm").shard*of${SHARDS}.log \
-                | awk '{print $2}')
+                | awk -v base="$SUB" '{ print ($2 ~ /^\//) ? $2 : base "/" $2 }')
         [ -n "$paths" ] || { echo "    no shard logs for $arm at SHARDS=$SHARDS" >&2; continue; }
         merge_shards $paths
     done

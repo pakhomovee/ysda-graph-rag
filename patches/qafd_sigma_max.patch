@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..586b360 100644
+index 40ee5b0..2e13e77 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -279,7 +279,7 @@ index 40ee5b0..586b360 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +768,225 @@ def main():
+@@ -647,11 +768,228 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -487,7 +487,10 @@ index 40ee5b0..586b360 100644
 +    with open(_dump_path, "w") as _f:
 +        json.dump(_dump, _f)
 +    _unmapped = sum(1 for _v in _dump.values() for _i in _v if _i < 0)
-+    print(f"wrote {_dump_path}  ({len(_dump)} questions, {_unmapped} unmapped docs)")
++    # Absolute: working_dir is relative and this process runs with cwd=<repo>, so
++    # a relative path here is unusable by anything that reads the log elsewhere.
++    print(f"wrote {os.path.abspath(_dump_path)}  "
++          f"({len(_dump)} questions, {_unmapped} unmapped docs)")
 +
 +    if config.edge_stats_file and retriever.edge_stats is not None:
 +        _st = dict(retriever.edge_stats)
@@ -505,7 +508,7 @@ index 40ee5b0..586b360 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1047,9 @@ def main():
+@@ -712,7 +1050,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
