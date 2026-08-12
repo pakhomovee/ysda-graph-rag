@@ -438,14 +438,22 @@ echo "==> did the weights steer anything? (read this FIRST)"
 $PY_MBUZAI "$ROOT/scripts/report_edge_contrast.py" "$ROOT"/out/edgestats_${OURS}_*.json
 
 echo "==> recall"
-# Exclude per-shard dumps: they hold a slice of the questions each, and
-# score_qafd intersects across arms, so including them collapses every arm to
-# one shard's worth.
-# Baseline follows the active config: at PROFILE=paper the comparable vanilla is
-# vanilla-a2-wsoriginal-ltk5, not the bare "vanilla" score_qafd defaults to.
-$PY_MBUZAI "$ROOT/scripts/score_qafd.py" $OURS \
-    --baseline "$(dump_stem vanilla)" \
-    --runs $(ls "$WORKDIR"/qafd_${OURS}_*.json | grep -v '\.shard[0-9]*of[0-9]*\.json$')
+# Score exactly the arms this invocation covers, named through dump_stem.
+# Globbing the directory pulls in per-shard slices and runs from other configs
+# and question counts, and score_qafd intersects question ids across everything
+# it is given -- one 100-question dump in the list silently collapses every arm
+# to 100 questions.
+_score=("$WORKDIR/qafd_${OURS}_$(dump_stem vanilla).json")
+for arm in $ARMS; do
+    _f="$WORKDIR/qafd_${OURS}_$(dump_stem "$arm").json"
+    [ -f "$_f" ] && [ "$_f" != "${_score[0]}" ] && _score+=("$_f")
+done
+if [ -f "${_score[0]}" ] && [ ${#_score[@]} -gt 1 ]; then
+    $PY_MBUZAI "$ROOT/scripts/score_qafd.py" $OURS \
+        --baseline "$(dump_stem vanilla)" --runs "${_score[@]}"
+else
+    echo "    (need $(dump_stem vanilla) plus one more arm of the same config)"
+fi
 
 cat <<'EOF'
 
