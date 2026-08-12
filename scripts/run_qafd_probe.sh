@@ -243,6 +243,7 @@ SUFFIX=""
 # overwriting the dumps behind the existing RESULTS.md table.
 [ "$WEIGHT_SCHEME" != multiply ] && SUFFIX="${SUFFIX}-ws${WEIGHT_SCHEME}"
 [ "$LINKING_TOP_K" != 10 ] && SUFFIX="${SUFFIX}-ltk${LINKING_TOP_K}"
+[ -n "${NUM_QUERIES:-}" ] && SUFFIX="${SUFFIX}-n${NUM_QUERIES}"
 
 # One shard of one arm.
 # benchmark_runner composes the dump name itself, starting from "vanilla" and
