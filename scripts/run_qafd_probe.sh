@@ -119,6 +119,22 @@ SHARDS=${SHARDS:-1}
 # completed but the merge did not.
 ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 accum4"}
 
+# Thread budget. Every worker is a separate python process, and numpy/torch each
+# size their pool from the core count at import, so N workers on a 64-core box
+# claim 64 threads EACH unless told otherwise -- JOBS=2 SHARDS=16 is 32 workers
+# asking for 2048 threads. Divide the box instead. Must be exported before python
+# starts; setting it inside would be too late.
+#
+# Process accounting, since the count is surprising: each shard is three
+# processes -- the backgrounded run_shard shell, the ( cd ... ) subshell, and
+# python -- plus one shell per arm. JOBS x SHARDS is the number that matters.
+_WORKERS=$(( JOBS * (SHARDS > 1 ? SHARDS : 1) ))
+_CORES=${CORES:-$(nproc)}
+_THREADS=$(( _CORES / (_WORKERS > 0 ? _WORKERS : 1) ))
+[ "$_THREADS" -lt 1 ] && _THREADS=1
+export OMP_NUM_THREADS=$_THREADS OPENBLAS_NUM_THREADS=$_THREADS \
+       MKL_NUM_THREADS=$_THREADS NUMEXPR_NUM_THREADS=$_THREADS
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/third_party/QAFD-RAG"
 ORACLE="$ROOT/out/qafd_oracle_${OURS}.json"
@@ -383,7 +399,7 @@ if [ -n "${MERGE_ONLY:-}" ]; then
     exit 0
 fi
 
-echo "==> arms (JOBS=$JOBS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
+echo "==> arms ($_WORKERS workers x $_THREADS threads of $_CORES cores, JOBS=$JOBS SHARDS=$SHARDS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
