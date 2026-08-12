@@ -89,7 +89,31 @@ python scripts/baselines.py musique --method hybrid
 python scripts/make_subq_ablations.py musique      # rows 4 and 5, no API
 python scripts/gen_subq.py musique                 # row 3, needs a GPU
 python scripts/eval_subq.py musique                # compare the sets — Gate B
+
+LLM_MODEL=<served-id> bash scripts/run_qafd_probe.sh   # edge-weight probe
 ```
+
+### The edge-weight probe
+
+`σ_max` on QAFD's diffusion edge weights is null. That has two incompatible
+readings — the site is inert, or the heuristic is too blunt — and only one of them
+says a trained edge scorer is worth building. `run_qafd_probe.sh` separates them
+without training anything:
+
+* an **oracle** edge weight, swept 10×/100×/1000×. It upper-bounds every possible
+  scorer at that site, so if recall is flat the ceiling is zero and there is
+  nothing to train. The sweep also measures how much dynamic range the site needs.
+* an **exponentiated** weight, `w·exp(β(s_u+s_v))`. Every published variant is
+  bounded — Hybrid spans `[1, 1.5]`, Product `[0, 1]` — and routing normalises
+  (`mass[j] += excess·w_ij/Σw`), so only the *spread* within a neighbourhood can
+  steer mass. One knob tests whether range was the blocker.
+* `qa_sink_gamma` / `qa_accum_gamma`, the two propagation sites where query
+  similarity enters unbounded, and which nothing in RESULTS.md has swept.
+
+Read `report_edge_contrast.py` before the recall table. It reports the dispersion
+of the routing distributions actually used, which is the only channel an edge
+weight has: **a null arm whose routing CV matches vanilla's never steered mass and
+proves nothing.**
 
 Everything writes to `out/`. Dense embeddings are cached per dataset, so only the
 first dense run pays the encode cost.

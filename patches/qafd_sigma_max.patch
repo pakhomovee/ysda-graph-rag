@@ -70,10 +70,44 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..8ebd32a 100644
+index 40ee5b0..574edbd 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
-@@ -110,13 +110,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
+@@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
+ if _project_root not in sys.path:
+     sys.path.insert(0, _project_root)
+ 
++
++def _load_normalize_question(sidecar_path: str):
++    """mbuzai.subq_io.normalize_question, importing mbuzai the same way the
++    retriever's sub-question loader does.
++
++    Every sidecar in out/ is keyed by the normalised question, so the oracle file
++    has to be read with the exact same function — a second implementation here
++    would drift and silently miss questions, which this probe reads as "the
++    oracle did nothing".
++    """
++    try:
++        from mbuzai.subq_io import normalize_question
++    except ImportError:
++        # The exporters write to <repo>/out/, so the checkout root is two levels
++        # up from the sidecar. Same fallback as retriever._query_set.
++        from pathlib import Path as _Path
++        _root = _Path(sidecar_path).resolve().parent.parent
++        if str(_root) not in sys.path:
++            sys.path.insert(0, str(_root))
++        try:
++            from mbuzai.subq_io import normalize_question
++        except ImportError as _exc:
++            raise ImportError(
++                f"cannot import mbuzai from {_root}; set PYTHONPATH=/path/to/mbuzai-rag"
++            ) from _exc
++    return normalize_question
++
+ # ---------------------------------------------------------------------------
+ # Bypass src/__init__.py (which imports heavy AWS deps) by registering
+ # src as a plain namespace package before any sub-package imports.
+@@ -110,13 +137,27 @@ async def _openai_complete(model, prompt, system_prompt=None, history_messages=[
      kwargs.pop("keyword_extraction", None)
      kwargs.setdefault("temperature", 0.0)
      kwargs.setdefault("seed", 0)
@@ -102,7 +136,19 @@ index 40ee5b0..8ebd32a 100644
  
  async def _openai_embed(texts, model="text-embedding-3-small", api_key=""):
      client = _get_client(api_key=api_key)
-@@ -426,6 +440,12 @@ def main():
+@@ -412,7 +453,10 @@ def main():
+     parser.add_argument("--qafd_alpha", type=float, default=1.5)
+     parser.add_argument("--qafd_epsilon", type=float, default=0.01)
+     parser.add_argument("--qafd_max_iterations", type=int, default=500)
+-    parser.add_argument("--qafd_weight_scheme", type=str, default="multiply")
++    parser.add_argument("--qafd_weight_scheme", type=str, default="multiply",
++                        choices=["original", "multiply", "add", "exp", "none"],
++                        help="original=Hybrid Eq.5c, multiply=Product Eq.5b, add=Mean Eq.5a, "
++                             "exp=w*exp(beta*(s_u+s_v)) (not in the paper; see --exp_beta)")
+     parser.add_argument("--qafd_step_size", type=float, default=0.2)
+ 
+     # Retrieval
+@@ -426,6 +470,23 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -112,19 +158,34 @@ index 40ee5b0..8ebd32a 100644
 +                        choices=["edges", "seeds", "both"],
 +                        help="where the query set is used: diffusion edge weights, "
 +                             "fact scores that drive seeding, or both")
++    # Edge-weight probe. Defaults reproduce the original algorithm bit for bit.
++    parser.add_argument("--oracle_gold_file", type=str, default=None,
++                        help="out/qafd_oracle_<dataset>.json; upper-bounds any edge scorer")
++    parser.add_argument("--oracle_edge_mult", type=float, default=1.0,
++                        help="multiplier for edges with both ends in a gold passage "
++                             "(1.0 = oracle off)")
++    parser.add_argument("--exp_beta", type=float, default=0.0,
++                        help="with --qafd_weight_scheme exp: w * exp(beta * (s_u + s_v))")
++    parser.add_argument("--edge_stats_file", type=str, default=None,
++                        help="dump routing-contrast instrumentation here")
++
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +479,8 @@ def main():
+@@ -459,6 +520,12 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
 +        subq_file=args.subq_file,
 +        subq_scope=args.subq_scope,
++        oracle_gold_file=args.oracle_gold_file,
++        oracle_edge_mult=args.oracle_edge_mult,
++        exp_beta=args.exp_beta,
++        edge_stats_file=args.edge_stats_file,
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +541,8 @@ def main():
+@@ -519,6 +586,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -133,7 +194,7 @@ index 40ee5b0..8ebd32a 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +553,9 @@ def main():
+@@ -529,6 +598,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -143,7 +204,7 @@ index 40ee5b0..8ebd32a 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -626,6 +653,19 @@ def main():
+@@ -626,6 +698,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -163,7 +224,80 @@ index 40ee5b0..8ebd32a 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -652,6 +692,36 @@ def main():
+@@ -647,11 +732,134 @@ def main():
+         openie_results_path=builder.openie_results_path,
+     )
+ 
++    # ----------------------------------------------------------------
++    # Edge-weight probe: resolve the oracle here, the only scope where `docs`
++    # (and therefore the corpus-index mapping) is in hand.
++    # ----------------------------------------------------------------
++    if config.oracle_gold_file:
++        retriever.prepare()   # idempotent; needed for the vertex/chunk mappings
++
++        with open(config.oracle_gold_file) as _f:
++            _gold_by_q = json.load(_f)   # {normalised question: [corpus_idx, ...]}
++
++        # corpus index -> passage node key. chunk content is byte-identical to
++        # docs[i]; the existing _doc_to_idx dump below relies on the same
++        # identity and reports 0 unmapped docs, so this direction is sound too.
++        _content_to_key = {
++            retriever.chunk_store.get_row(_k)["content"]: _k
++            for _k in retriever.passage_node_keys
++        }
++
++        # Invert entity->chunks once. Doing it per question would be
++        # |entities| x |questions| set intersections.
++        _chunk_to_entity_idxs = {}
++        for _nk, _cids in retriever.ent_node_to_chunk_ids.items():
++            _vi = retriever.node_name_to_vertex_idx.get(_nk)
++            if _vi is None:
++                continue
++            for _cid in _cids:
++                _chunk_to_entity_idxs.setdefault(_cid, []).append(_vi)
++
++        _norm = _load_normalize_question(config.oracle_gold_file)
++        _sizes = []
++        for _q in all_queries:
++            _pids = _gold_by_q.get(_norm(_q))
++            if not _pids:
++                continue
++            _nodes = set()
++            for _pid in _pids:
++                if not (0 <= _pid < len(docs)):
++                    continue
++                _key = _content_to_key.get(docs[_pid])
++                if _key is None:
++                    continue
++                _vi = retriever.node_name_to_vertex_idx.get(_key)
++                if _vi is not None:
++                    _nodes.add(_vi)          # the gold passage node itself
++                _nodes.update(_chunk_to_entity_idxs.get(_key, ()))   # its entities
++            if _nodes:
++                retriever.oracle_nodes_by_q[_q] = _nodes
++                _sizes.append(len(_nodes))
++
++        _cov = len(_sizes) / max(len(all_queries), 1)
++        print(f"oracle: {len(_sizes)}/{len(all_queries)} questions matched "
++              f"({_cov:.1%}), mean {np.mean(_sizes) if _sizes else 0:.1f} nodes/question, "
++              f"mult={config.oracle_edge_mult}")
++        # An empty oracle boosts nothing and reproduces vanilla exactly — which is
++        # precisely the conclusion this run exists to test. Refuse rather than
++        # let a broken mapping be read as "the site is inert".
++        if not _sizes or _cov < 0.9:
++            raise SystemExit(
++                f"\nFATAL: oracle resolved for only {_cov:.1%} of questions.\n"
++                "  A silently empty oracle is indistinguishable from a null result.\n"
++                "  Check that --oracle_gold_file was built from the SAME corpus that\n"
++                f"  was indexed into {config.working_dir}\n"
++                "    python scripts/make_qafd_oracle.py <dataset>"
++            )
++
++    if config.edge_stats_file:
++        retriever.edge_stats = {}
++
+     logger.info("Running retrieval ...")
+     retrieval_results = retriever.retrieve(
          queries=all_queries, num_to_retrieve=config.retrieval_top_k
      )
  
@@ -191,20 +325,45 @@ index 40ee5b0..8ebd32a 100644
 +                                 "viewsshuf", "views2", "views3", "views4", "views6", "views")
 +                     if _stem.endswith(t)), "subq")
 +        _arm = "%s-%s" % (config.subq_scope, _tag)
++    # The probe arms differ only by a numeric flag, so they must reach the arm
++    # name too — otherwise oracle-10 and oracle-1000 both land on "vanilla.json"
++    # and the sweep overwrites itself, which is the same footgun the comment
++    # above records for --subq_file.
++    if config.oracle_edge_mult != 1.0:
++        _arm += "-oracle%g" % config.oracle_edge_mult
++    if config.qafd_weight_scheme == "exp":
++        _arm += "-expb%g" % config.exp_beta
++    if config.qa_sink_gamma:
++        _arm += "-sink%g" % config.qa_sink_gamma
++    if config.qa_accum_gamma:
++        _arm += "-accum%g" % config.qa_accum_gamma
 +    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
 +    with open(_dump_path, "w") as _f:
 +        json.dump(_dump, _f)
 +    _unmapped = sum(1 for _v in _dump.values() for _i in _v if _i < 0)
 +    print(f"wrote {_dump_path}  ({len(_dump)} questions, {_unmapped} unmapped docs)")
 +
++    if config.edge_stats_file and retriever.edge_stats is not None:
++        _st = dict(retriever.edge_stats)
++        _st["arm"] = _arm
++        # Mean dispersion of the routing distributions actually used. This is the
++        # only channel by which an edge weight can influence the ranking, so a
++        # null arm with cv ~= a vanilla arm's cv means the weight never steered
++        # anything — a plumbing fact, not a fact about the site.
++        _st["routing_cv"] = (_st.get("cv_sum", 0.0) / _st["cv_n"]) if _st.get("cv_n") else None
++        with open(config.edge_stats_file, "w") as _f:
++            json.dump(_st, _f, indent=2)
++        print(f"wrote {config.edge_stats_file}  "
++              f"(routing_cv={_st['routing_cv']}, boosted_edges={_st.get('boosted_edges', 0)})")
++
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
-index d015a39..3ffd772 100644
+index d015a39..f2ae90a 100644
 --- a/src/passage_entity/config.py
 +++ b/src/passage_entity/config.py
-@@ -57,6 +57,10 @@ class PassageEntityConfig:
+@@ -57,6 +57,16 @@ class PassageEntityConfig:
      qafd_random_seed: int = 42
  
      # ── Query-aware enhancements (all default = original behaviour) ────────
@@ -212,11 +371,17 @@ index d015a39..3ffd772 100644
 +    subq_file: Optional[str] = None  # *_bytext.json, keyed by normalised question
 +    subq_scope: str = "edges"        # "edges" | "seeds" | "both"
 +
++    # Edge-weight probe. Defaults reproduce the original algorithm exactly.
++    oracle_gold_file: Optional[str] = None  # {normalised question: [corpus_idx, ...]}
++    oracle_edge_mult: float = 1.0           # 1.0 = oracle off
++    exp_beta: float = 0.0                   # used only by qafd_weight_scheme="exp"
++    edge_stats_file: Optional[str] = None   # routing-contrast instrumentation dump
++
      sim_mode: str = "normalized"     # Similarity contrast: "normalized", "relu", "relu_sq"
      qa_sink_gamma: float = 0.0       # Query-aware sink capacity (0=off)
      qa_warm_delta: float = 0.0       # Query-aware seed bias (0=off)
 diff --git a/src/passage_entity/graph_adapter.py b/src/passage_entity/graph_adapter.py
-index b8d98b3..e4fc113 100644
+index b8d98b3..530ff7c 100644
 --- a/src/passage_entity/graph_adapter.py
 +++ b/src/passage_entity/graph_adapter.py
 @@ -59,6 +59,16 @@ def _cosine_similarity(vec1: np.ndarray, vec2: np.ndarray, mode: str = "normaliz
@@ -236,9 +401,76 @@ index b8d98b3..e4fc113 100644
      dot = np.dot(vec1, vec2)
      m1 = np.linalg.norm(vec1)
      m2 = np.linalg.norm(vec2)
-@@ -248,7 +258,9 @@ class IGraphQAFD:
-             self._edge_weight_cache[key] = w
-             return w
+@@ -94,7 +104,7 @@ class IGraphQAFD:
+     alpha, epsilon, max_iterations, step_size : float / int
+         Algorithm parameters.
+     weight_scheme : str
+-        "original", "multiply", or "add".
++        "original", "multiply", "add", or "exp".
+     random_seed : int
+     """
+ 
+@@ -122,6 +132,11 @@ class IGraphQAFD:
+         qa_warm_walk: bool = False,     # query-aware warm-start random walk (uses edge weights)
+         qa_warm_steps: int = 2,         # number of warm-start steps (default 2)
+         qa_accum_gamma: float = 0.0,    # query-aware x accumulation boost
++        # ── Edge-weight probe (all default OFF = original behaviour) ──
++        exp_beta: float = 0.0,          # weight_scheme="exp": w * exp(beta * (s1 + s2))
++        oracle_nodes: Optional[set] = None,   # vertex indices of gold-passage nodes
++        oracle_edge_mult: float = 1.0,  # multiplier on edges with BOTH ends in oracle_nodes
++        edge_stats: Optional[Dict] = None,    # in/out: routing-contrast instrumentation
+     ):
+         self.graph = graph
+         self.node_name_to_idx = node_name_to_idx
+@@ -141,12 +156,22 @@ class IGraphQAFD:
+         self.qa_warm_delta = qa_warm_delta
+         self.qa_warm_walk = qa_warm_walk
+         self.qa_accum_gamma = qa_accum_gamma
++        self.exp_beta = exp_beta
++        self.oracle_nodes = oracle_nodes or None
++        self.oracle_edge_mult = oracle_edge_mult
++        self.edge_stats = edge_stats
+ 
+         n = len(node_name_to_idx)
+ 
+-        # Precompute per-node query similarity (used by sink/warm QA)
++        # Precompute per-node query similarity (used by sink/warm/accum QA).
++        #
++        # qa_accum_gamma was missing from this guard upstream, so `_push` read an
++        # all-zero _node_query_sim and the accumulation boost silently multiplied
++        # by 1.0 — the knob was inert at every setting. Fixed here because the
++        # probe sweeps it as a propagation site; without this the arm would
++        # reproduce vanilla and be mistaken for evidence that propagation is dead.
+         self._node_query_sim = np.zeros(n)
+-        if (qa_sink_gamma > 0 or qa_warm_delta > 0) and query_embedding is not None:
++        if (qa_sink_gamma > 0 or qa_warm_delta > 0 or qa_accum_gamma > 0) and query_embedding is not None:
+             for i in range(n):
+                 name = self.idx_to_node_name.get(i)
+                 if name:
+@@ -233,22 +258,24 @@ class IGraphQAFD:
+ 
+         # Query-aware modulation
+         if self.weight_scheme == "none" or not self.node_embeddings or self.query_embedding is None:
+-            self._edge_weight_cache[key] = w
+-            return w
++            self._edge_weight_cache[key] = self._oracle(i, j, w)
++            return self._edge_weight_cache[key]
+ 
+         n1 = self.idx_to_node_name.get(i)
+         n2 = self.idx_to_node_name.get(j)
+         if n1 is None or n2 is None:
+-            self._edge_weight_cache[key] = w
+-            return w
++            self._edge_weight_cache[key] = self._oracle(i, j, w)
++            return self._edge_weight_cache[key]
+ 
+         e1 = self.node_embeddings.get(n1)
+         e2 = self.node_embeddings.get(n2)
+         if e1 is None and e2 is None:
+-            self._edge_weight_cache[key] = w
+-            return w
++            self._edge_weight_cache[key] = self._oracle(i, j, w)
++            return self._edge_weight_cache[key]
  
 -        zero = np.zeros_like(self.query_embedding)
 +        # shape[-1], not zeros_like: the query side may be a (m, d) query set,
@@ -247,6 +479,124 @@ index b8d98b3..e4fc113 100644
          s1 = _cosine_similarity(e1 if e1 is not None else zero, self.query_embedding, mode=self.sim_mode)
          s2 = _cosine_similarity(e2 if e2 is not None else zero, self.query_embedding, mode=self.sim_mode)
  
+@@ -258,13 +285,42 @@ class IGraphQAFD:
+         elif self.weight_scheme == "add":
+             # Mean (Eq. 5a): (w + sim(u,q) + sim(v,q)) / 3
+             qw = (w + s1 + s2) / 3.0
++        elif self.weight_scheme == "exp":
++            # Not in the paper. Every published variant is bounded: Hybrid spans
++            # [a, a+2b] = [1, 1.5] and Product [0, 1], so with mpnet similarities
++            # clustered in a narrow band the ratio between the most and least
++            # query-relevant edge is a few percent. Routing normalises
++            # (mass[j] += excess * w_ij / w_qa), so only that ratio can steer
++            # anything. exp(beta * .) makes the range unbounded in one knob,
++            # which is what Lemma 6's separation condition actually asks for.
++            qw = w * float(np.exp(self.exp_beta * (s1 + s2)))
+         else:  # "original" = Hybrid (Eq. 5c)
+             # w * (a + b * avg_query_sim)
+             qf = (s1 + s2) / 2.0
+             qw = w * (self.hybrid_a + self.hybrid_b * qf)
+ 
+-        self._edge_weight_cache[key] = qw
+-        return qw
++        self._edge_weight_cache[key] = self._oracle(i, j, qw)
++        return self._edge_weight_cache[key]
++
++    def _oracle(self, i: int, j: int, w: float) -> float:
++        """Upper bound for any scorer at this site: hand the edge the answer.
++
++        An edge with BOTH endpoints inside a gold passage is multiplied by
++        oracle_edge_mult. No function of (h_u, h_v, h_q) — heuristic or trained —
++        can separate relevant from irrelevant edges better than being told, so if
++        recall does not move under this, the site cannot be rescued by a better
++        weight and there is nothing to train.
++
++        Applied after the scheme so it composes with any of them, and counted so
++        a null can be distinguished from an oracle that never fired.
++        """
++        if self.oracle_nodes is None or self.oracle_edge_mult == 1.0:
++            return w
++        if i in self.oracle_nodes and j in self.oracle_nodes:
++            if self.edge_stats is not None:
++                self.edge_stats["boosted_edges"] = self.edge_stats.get("boosted_edges", 0) + 1
++            return w * self.oracle_edge_mult
++        return w
+ 
+     # ------------------------------------------------------------------
+     def _initialize(self):
+@@ -340,10 +396,25 @@ class IGraphQAFD:
+         self.mass[node_idx] = self.sink_capacity[node_idx]
+ 
+         # Route mass using QUERY-AWARE weights
++        routed = []
+         for j in neighbors:
+             w_ij = self._get_edge_weight(node_idx, j)
+             if w_ij > 0:
+                 self.mass[j] += excess * w_ij / (w_qa + 1e-8)
++            routed.append(w_ij / (w_qa + 1e-8))
++
++        # Instrumentation: dispersion of the routing distribution actually used.
++        # This is the whole channel by which edge weights influence anything —
++        # the shares are normalised, so a distribution with near-zero spread
++        # routes mass the same way uniform weights would, no matter how the
++        # weights were computed. Measured here rather than over all edges because
++        # only pushed neighbourhoods ever affect the result.
++        if self.edge_stats is not None and len(routed) > 1:
++            r = np.asarray(routed, dtype=np.float64)
++            mu = r.mean()
++            if mu > 0:
++                self.edge_stats["cv_sum"] = self.edge_stats.get("cv_sum", 0.0) + float(r.std() / mu)
++                self.edge_stats["cv_n"] = self.edge_stats.get("cv_n", 0) + 1
+ 
+         return True
+ 
+@@ -392,6 +463,12 @@ class IGraphQAFD:
+             logger.warning(f"QAFD did not converge after {self.max_iterations} iterations")
+ 
+         logger.info(f"QAFD: {iterations} iters, {pushes} pushes, batch={batch_push}")
++
++        if self.edge_stats is not None:
++            self.edge_stats["pushes"] = self.edge_stats.get("pushes", 0) + pushes
++            self.edge_stats["iterations"] = self.edge_stats.get("iterations", 0) + iterations
++            self.edge_stats["queries"] = self.edge_stats.get("queries", 0) + 1
++
+         return self.x
+ 
+ 
+@@ -423,6 +500,10 @@ def run_igraph_qafd(
+     qa_accum_gamma: float = 0.0,
+     qa_post_lambda: float = 0.0,
+     batch_push: bool = False,
++    exp_beta: float = 0.0,
++    oracle_nodes: Optional[set] = None,
++    oracle_edge_mult: float = 1.0,
++    edge_stats: Optional[Dict] = None,
+ ) -> Tuple[np.ndarray, np.ndarray]:
+     """Run QAFD on igraph and return (sorted_doc_ids, sorted_doc_scores).
+ 
+@@ -431,6 +512,11 @@ def run_igraph_qafd(
+         qa_sink_gamma:  Scale sink capacity by (1 + gamma * sim(node, query))
+         qa_warm_delta:  Bias warm-start x toward query-relevant seeds
+         qa_post_lambda: Rerank output by (1 + lambda * sim(passage, query))
++    Edge-weight probe (default OFF):
++        exp_beta:          with weight_scheme="exp", w * exp(beta * (s1 + s2))
++        oracle_nodes:      vertex indices inside gold passages
++        oracle_edge_mult:  multiplier for edges with both ends in oracle_nodes
++        edge_stats:        dict accumulated across queries; see IGraphQAFD._push
+     """
+     qafd = IGraphQAFD(
+         graph=graph,
+@@ -453,6 +539,10 @@ def run_igraph_qafd(
+         qa_warm_walk=qa_warm_walk,
+         qa_warm_steps=qa_warm_steps,
+         qa_accum_gamma=qa_accum_gamma,
++        exp_beta=exp_beta,
++        oracle_nodes=oracle_nodes,
++        oracle_edge_mult=oracle_edge_mult,
++        edge_stats=edge_stats,
+     )
+ 
+     node_scores = qafd.run(batch_push=batch_push)
 diff --git a/src/passage_entity/openie.py b/src/passage_entity/openie.py
 index b728039..fa83910 100644
 --- a/src/passage_entity/openie.py
@@ -286,10 +636,24 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..fa4ebf1 100644
+index e2b2da2..6202c20 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
-@@ -151,6 +151,51 @@ class PassageEntityRetriever:
+@@ -83,6 +83,13 @@ class PassageEntityRetriever:
+         self._query_emb_fact: Dict[str, np.ndarray] = {}
+         self._query_emb_pass: Dict[str, np.ndarray] = {}
+ 
++        # Edge-weight probe. benchmark_runner resolves the oracle to vertex indices
++        # and assigns these — it is the only scope where `docs` (and therefore the
++        # corpus-index mapping) is available. Left empty, the diffusion call below
++        # passes oracle_nodes=None and behaviour is unchanged.
++        self.oracle_nodes_by_q: Dict[str, set] = {}
++        self.edge_stats: Optional[Dict] = None
++
+         # Timing accumulators
+         self.rerank_time = 0.0
+         self.qafd_time = 0.0
+@@ -151,6 +158,51 @@ class PassageEntityRetriever:
      # Query embedding
      # ------------------------------------------------------------------
  
@@ -341,7 +705,7 @@ index e2b2da2..fa4ebf1 100644
      def _encode_queries(self, queries: List[str]):
          to_encode = [q for q in queries if q not in self._query_emb_fact]
          if not to_encode:
-@@ -171,15 +216,21 @@ class PassageEntityRetriever:
+@@ -171,15 +223,21 @@ class PassageEntityRetriever:
      # ------------------------------------------------------------------
  
      def _get_fact_scores(self, query: str) -> np.ndarray:
@@ -366,7 +730,7 @@ index e2b2da2..fa4ebf1 100644
          return min_max_normalize(scores)
  
      # ------------------------------------------------------------------
-@@ -322,7 +373,12 @@ class PassageEntityRetriever:
+@@ -322,7 +380,18 @@ class PassageEntityRetriever:
                  if i < len(self.passage_embeddings):
                      self._node_emb_dict[nk] = self.passage_embeddings[i]
  
@@ -377,6 +741,23 @@ index e2b2da2..fa4ebf1 100644
 +            query_emb = self._query_matrix(query, "fact")
 +        else:
 +            query_emb = self._query_emb_fact.get(query)
++
++        # Oracle edge weights: which vertices sit inside this question's gold
++        # passages. Keyed by the exact query string benchmark_runner will pass —
++        # it resolves the normalised-question lookup once at setup, so there is
++        # no per-query normalisation and no mbuzai import on the hot path.
++        oracle_nodes = self.oracle_nodes_by_q.get(query) if self.oracle_nodes_by_q else None
  
          # --- Run QAFD ---
          qafd_start = time.time()
+@@ -348,6 +417,10 @@ class PassageEntityRetriever:
+             qa_accum_gamma=self.config.qa_accum_gamma,
+             qa_post_lambda=self.config.qa_post_lambda,
+             batch_push=self.config.batch_push,
++            exp_beta=self.config.exp_beta,
++            oracle_nodes=oracle_nodes,
++            oracle_edge_mult=self.config.oracle_edge_mult,
++            edge_stats=self.edge_stats,
+         )
+         qafd_elapsed = time.time() - qafd_start
+         self.qafd_time += qafd_elapsed

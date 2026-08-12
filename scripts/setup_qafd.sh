@@ -48,6 +48,8 @@ echo "==> sanity"
 grep -q "sigma_max" "$SUB/src/passage_entity/graph_adapter.py" && echo "    _cosine_similarity takes a query set"
 grep -q "subq_scope" "$SUB/src/passage_entity/config.py"       && echo "    config exposes subq_file / subq_scope"
 grep -q "_query_matrix" "$SUB/src/passage_entity/retriever.py" && echo "    retriever builds the query set"
+grep -q "def _oracle" "$SUB/src/passage_entity/graph_adapter.py" && echo "    edge-weight probe: oracle + exp scheme"
+grep -q "oracle_gold_file" "$SUB/src/passage_entity/config.py"   && echo "    config exposes the probe flags"
 grep -q '"mpnet"' "$SUB/src/passage_entity/benchmark_runner.py" \
     && echo "    mpnet encoder registered" \
     || { echo "    FATAL: encoder missing — stale patch in the working tree" >&2; exit 1; }
@@ -71,6 +73,22 @@ cat <<EOF
   Keep them separable. In LinearRAG the gate improved the activation frontier
   while seeding stayed pooled, and the two effects could not be told apart
   afterwards.
+
+  The patch also carries the edge-weight probe, which asks whether the
+  propagation site has any headroom at all before anyone trains a scorer for it:
+    --oracle_gold_file/--oracle_edge_mult   hand the edge the answer; this
+                                            upper-bounds every possible scorer
+    --qafd_weight_scheme exp --exp_beta     w * exp(beta*(s_u+s_v)); unbounded
+                                            range, where every published variant
+                                            is bounded and routing normalises
+    --edge_stats_file                       routing dispersion, so a null arm can
+                                            be told apart from an inert one
+  All default to the original algorithm; verified bitwise inert against the
+  pre-probe code for every weight scheme. Driver: scripts/run_qafd_probe.sh.
+
+  One upstream bug fixed in passing: qa_accum_gamma was missing from the
+  _node_query_sim precompute guard, so the accumulation boost multiplied by an
+  all-zero similarity and the knob did nothing at any setting.
 
 ==> next, by hand
   Python 3.10 env:

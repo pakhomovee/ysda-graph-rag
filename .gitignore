@@ -12,3 +12,6 @@ out/*_bytext.json
 out/linearrag_*
 third_party/LinearRAG/dataset/
 out/*_rerank.json
+out/qafd_oracle_*.json
+out/edgestats_*.json
+out/scored_qafd_*.json
