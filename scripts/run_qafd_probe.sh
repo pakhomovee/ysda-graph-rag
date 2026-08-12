@@ -139,6 +139,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/third_party/QAFD-RAG"
 ORACLE="$ROOT/out/qafd_oracle_${OURS}.json"
 SUBQ=${SUBQ:-$ROOT/out/subq_${OURS}_generated_bytext.json}
+EDGE_MODEL=${EDGE_MODEL:-$ROOT/out/edge_scorer_${OURS}.npz}
 
 echo "==> preflight"
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
@@ -275,6 +276,7 @@ dump_stem () {
         subqedges) echo "edges-generated${SUFFIX}" ;;
         subqseeds) echo "seeds-generated${SUFFIX}" ;;
         dpr)       echo "vanilla-dpr${SUFFIX}" ;;
+        edgemodel*) echo "vanilla-em${a#edgemodel}${SUFFIX}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
     esac
@@ -369,6 +371,9 @@ arm_flags () {   # arm name -> benchmark_runner flags
     case $a in
         vanilla)   ;;
         dpr)       printf '%s\n' --retrieval_mode dpr ;;
+        # trained w(u,v,q). edgemodel<beta> sets its dynamic range.
+        edgemodel*) printf '%s\n' --edge_model_file "$EDGE_MODEL" \
+                        --edge_model_beta "${a#edgemodel}" ;;
         # oracle<mult>[ent][seed] — ent drops the gold PASSAGE node (which is also a
         # ranking target) so the arm measures steering rather than mass landing on
         # the answer; seed spends the multiplier on source mass instead of edges.
