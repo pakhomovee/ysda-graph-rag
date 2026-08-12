@@ -131,6 +131,28 @@ EOF
 exit 1; }
 echo "    ok: patched submodule, LLM reachable, index at $WORKDIR"
 
+# Report every missing dependency at once. These surface one import at a time,
+# tens of minutes apart when arms run in parallel, and QAFD's requirements.txt
+# does not list pandas at all — it arrives transitively via `datasets`, so a
+# partial install leaves an env that gets a long way in before failing.
+# find_spec locates without importing, so this is fast and side-effect free.
+_missing=$($PY - <<'PYEOF'
+import importlib.util as u
+need = {"numpy": "numpy", "pandas": "pandas", "igraph": "python-igraph",
+        "networkx": "networkx", "torch": "torch", "tqdm": "tqdm",
+        "openai": "openai", "sentence_transformers": "sentence-transformers"}
+print(" ".join(pip for mod, pip in need.items() if u.find_spec(mod) is None))
+PYEOF
+)
+[ -z "$_missing" ] || { cat >&2 <<EOF
+missing from the QAFD env ($($PY -c 'import sys; print(sys.executable)')):
+    $_missing
+  Install, then rerun:
+    $PY -m pip install $_missing
+EOF
+exit 1; }
+echo "    ok: QAFD env has the retrieval-path imports"
+
 echo "==> oracle gold map"
 $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 
@@ -160,13 +182,21 @@ run_arm () {
 }
 
 arm_flags () {   # arm name -> benchmark_runner flags
-    case $1 in
+    local a=$1 mult
+    case $a in
         vanilla)   ;;
-        oracle*)   printf '%s\n' --oracle_gold_file "$ORACLE" --oracle_edge_mult "${1#oracle}" ;;
-        expb*)     printf '%s\n' --qafd_weight_scheme exp --exp_beta "${1#expb}" ;;
-        sink*)     printf '%s\n' --qa_sink_gamma "${1#sink}" ;;
-        accum*)    printf '%s\n' --qa_accum_gamma "${1#accum}" ;;
-        *)         echo "unknown arm: $1" >&2; return 1 ;;
+        # oracle<mult>[ent][seed] — ent drops the gold PASSAGE node (which is also a
+        # ranking target) so the arm measures steering rather than mass landing on
+        # the answer; seed spends the multiplier on source mass instead of edges.
+        oracle*)
+            mult=${a#oracle}; mult=${mult%seed}; mult=${mult%ent}
+            printf '%s\n' --oracle_gold_file "$ORACLE" --oracle_edge_mult "$mult"
+            case $a in *ent*)  printf '%s\n' --oracle_nodes entities ;; esac
+            case $a in *seed*) printf '%s\n' --oracle_site  seeds    ;; esac ;;
+        expb*)     printf '%s\n' --qafd_weight_scheme exp --exp_beta "${a#expb}" ;;
+        sink*)     printf '%s\n' --qa_sink_gamma "${a#sink}" ;;
+        accum*)    printf '%s\n' --qa_accum_gamma "${a#accum}" ;;
+        *)         echo "unknown arm: $a" >&2; return 1 ;;
     esac
 }
 

@@ -131,6 +131,27 @@ of the routing distributions actually used, which is the only channel an edge
 weight has: **a null arm whose routing CV matches vanilla's never steered mass and
 proves nothing.**
 
+The oracle came back positive (+0.114 @10 at 1000×, monotone), so the site is
+range-limited rather than inert — see RESULTS.md §5. Two questions follow, and both
+are cheaper than training a scorer:
+
+```bash
+# does it still hold without the leak? the oracle boosts gold PASSAGE nodes,
+# which are also the ranking targets. --oracle_nodes entities drops them.
+ARMS="oracle1000ent oracle100ent oracle1000seed" JOBS=3 bash scripts/run_qafd_probe.sh
+
+# the oracle shows "if you knew, it would help". can you know?
+bash scripts/export_qafd_nodes.sh                  # QAFD env, no LLM
+python scripts/probe_learnability.py musique       # mbuzai env, CPU, minutes
+```
+
+`probe_learnability.py` asks whether any light model — a learned diagonal metric, a
+low-rank correction to cosine, or an MLP over `[h_e⊙h_q, |h_e−h_q|, cos, deg]` — beats
+plain cosine at ranking a question's gold entities. All are functions of the same
+arguments the pipeline already has, split by question, reported on held-out questions.
+If they tie with cosine, the oracle's headroom is not reachable from these vectors and
+the in-pipeline scorer should not be built.
+
 Everything writes to `out/`. Dense embeddings are cached per dataset, so only the
 first dense run pays the encode cost.
 

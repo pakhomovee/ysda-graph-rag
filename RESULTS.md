@@ -35,7 +35,7 @@ retrievers, plus a content control on the largest effect.
 | query set applied at | system | effect @10 |
 |---|---|---|
 | sentence gate — *propagation* | LinearRAG | +0.011\*, falls to +0.004 under a good scorer |
-| edge weights — *propagation* | QAFD-RAG | +0.002, null |
+| edge weights — *propagation* | QAFD-RAG | +0.002, null — but oracle +0.114\*, so range-limited, not inert |
 | **fact scores — *selection*** | **QAFD-RAG** | **+0.073\*  (+16.0% relative)** |
 | **cross-encoder — *scoring*** | any | **+0.019\***, on any retriever's candidates |
 
@@ -129,10 +129,50 @@ them: lowering `iteration_threshold` (the advantage *shrinks*), removing the
 | σ_max on **fact scores** (seeding) | 0.2492 | **0.5332 (+0.0734\*)** | 0.7452 (+0.0329\*) |
 | **shuffled control**, seeding | 0.0973 | 0.3844 (−0.0753\*) | 0.6895 |
 
-Edge weighting — the site the flow-diffusion paper makes query-aware, and our
-first guess — does **nothing**, in every bucket at every k. Seeding gives +16.0%
-relative, significant in every bucket at every k, growing with depth (2hop +0.061
-→ 4hop-join +0.116 → 4hop3 +0.145).
+Seeding gives +16.0% relative, significant in every bucket at every k, growing with
+depth (2hop +0.061 → 4hop-join +0.116 → 4hop3 +0.145).
+
+Edge weighting — the site the flow-diffusion paper makes query-aware, and our first
+guess — is null in every bucket at every k. **That null is a property of the
+parameterisation, not of the site.** An oracle edge weight, run against the same
+index, moves recall a long way:
+
+| arm | routing_cv | Δ@2 | Δ@10 | Δ@50 |
+|---|---|---|---|---|
+| vanilla | 0.122 | — | — | — |
+| σ_max on edge weights | — | −0.002 | +0.000 | +0.001 |
+| oracle 10× | 0.256 | +0.047\* | +0.035\* | +0.009\* |
+| oracle 100× | 0.632 | +0.117\* | +0.085\* | +0.026\* |
+| oracle 1000× | 1.069 | +0.159\* | **+0.114\*** | +0.042\* |
+
+Monotone in magnitude, significant in every bucket at every k. The mechanism is
+visible directly. QAFD routes mass as `mass[j] += excess · w_ij / Σ_k w_ik`, so the
+shares are **normalised**: only the *spread* of weights within a neighbourhood can
+steer anything, and the absolute level divides out. `routing_cv` measures that spread
+over the neighbourhoods actually pushed. Vanilla routes at 0.122 and the oracle needs
+~8.75× that to deliver its gain — but Product is bounded in `[0,1]` and Hybrid in
+`[1,1.5]`, so neither can produce it. σ_max makes this worse rather than better: `max`
+lifts every node's similarity, irrelevant ones included, and under a normalised
+distribution lifting everything toward the ceiling *reduces* contrast.
+
+So the sharper statement of the placement result is not "propagation is dead":
+
+> `max` helps where **global rank** decides — seeding takes a top-N cut over all
+> nodes — and washes out where only **local relative contrast** decides, because
+> routing normalises per neighbourhood.
+
+**The oracle leaks, and its size should be read with that in mind.** It boosts edges
+among gold-*passage* nodes, and passage nodes are the ranking targets, so it partly
+pumps mass straight into the scored node rather than steering traversal toward it. A
+learned scorer cannot identify the gold passage — that is the retrieval task. An
+entity-only oracle, dropping the passage node and keeping only its extracted entities,
+is the arm that separates steering from leak; until it runs, +0.114 is an upper bound
+on an upper bound.
+
+**Session-to-session drift is measured, not assumed.** Re-running vanilla against the
+same index gives −0.0022 @10, CI [−0.007, +0.002] — null, and consistent with the
+~0.002–0.005 run-to-run figure quoted at the top. Every delta in this section is
+paired against a same-session baseline.
 
 **The shuffled control is the strongest single piece of evidence here.** Same
 number of sub-questions, same `max` over the same number of vectors, content
@@ -216,12 +256,19 @@ effect in the set.
 
 ### What would strengthen it most, in order
 
-1. **The shuffled control on the proxy and on the reranker.** Cheap, and it
+1. **The entity-only oracle on QAFD edge weights.** The +0.114 above boosts edges
+   among gold *passage* nodes, which are also the ranking targets, so part of it is
+   mass landing on the answer rather than steering toward it. Dropping the passage
+   node from the oracle set separates the two. This gates everything else about the
+   propagation site: if it goes flat, there is no reachable headroom there.
+2. **The oracle arm on QAFD seeding** — the ceiling for the largest effect, and the
+   only way to compare sites honestly. Right now a *ceiling* at propagation (+0.114)
+   is being read against a *realized* gain at selection (+0.073).
+3. **The shuffled control on the proxy and on the reranker.** Cheap, and it
    closes the last operator-versus-content question.
-2. **The oracle arm on QAFD seeding** — the ceiling for the largest effect.
-3. **A second dataset through QAFD** (2Wiki), since the placement claim currently
+4. **A second dataset through QAFD** (2Wiki), since the placement claim currently
    rests on one dataset for the largest number.
-4. **Answer-level metrics (EM/F1)**, since everything here is retrieval recall.
+5. **Answer-level metrics (EM/F1)**, since everything here is retrieval recall.
 
 ## Reproducing
 
@@ -234,6 +281,15 @@ python scripts/eval_subq.py musique --device cuda:3 --fusion max mean rrf
 
 bash scripts/setup_linearrag.sh   && bash scripts/run_linear_musique.sh
 bash scripts/setup_qafd.sh        # then src/passage_entity/benchmark_runner.py
+
+# edge-weight probe: oracle sweep, exp sharpening, the unswept propagation knobs
+JOBS=4 bash scripts/run_qafd_probe.sh
+ARMS="oracle1000ent oracle100ent oracle1000seed" JOBS=3 bash scripts/run_qafd_probe.sh
+
+# offline: can any light model beat cosine at finding gold nodes? CPU, no LLM
+bash scripts/export_qafd_nodes.sh                       # QAFD env
+python scripts/probe_learnability.py musique --shuffle-control   # must give AUC~0.5
+python scripts/probe_learnability.py musique
 ```
 
 Both third-party systems are pinned submodules patched from `patches/*.patch`;

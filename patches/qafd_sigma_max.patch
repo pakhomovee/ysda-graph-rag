@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..4dc41e0 100644
+index 40ee5b0..0a486ef 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -160,7 +160,7 @@ index 40ee5b0..4dc41e0 100644
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,23 @@ def main():
+@@ -426,6 +470,37 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -176,15 +176,29 @@ index 40ee5b0..4dc41e0 100644
 +    parser.add_argument("--oracle_edge_mult", type=float, default=1.0,
 +                        help="multiplier for edges with both ends in a gold passage "
 +                             "(1.0 = oracle off)")
++    parser.add_argument("--oracle_nodes", type=str, default="all",
++                        choices=["all", "entities"],
++                        help="which vertices count as gold. 'all' includes the gold "
++                             "PASSAGE node, which is also what gets ranked, so the "
++                             "multiplier partly pumps mass straight into the scored "
++                             "node; 'entities' keeps only the entities extracted from "
++                             "those passages and measures steering alone")
++    parser.add_argument("--oracle_site", type=str, default="edges",
++                        choices=["edges", "seeds"],
++                        help="where the multiplier applies: diffusion edge weights, or "
++                             "the source mass (the ceiling for the seeding site)")
 +    parser.add_argument("--exp_beta", type=float, default=0.0,
 +                        help="with --qafd_weight_scheme exp: w * exp(beta * (s_u + s_v))")
 +    parser.add_argument("--edge_stats_file", type=str, default=None,
 +                        help="dump routing-contrast instrumentation here")
++    parser.add_argument("--export_nodes", type=str, default=None,
++                        help="dump graph + frozen vectors to this .npz for the offline "
++                             "learnability probe, then exit before retrieval")
 +
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +520,12 @@ def main():
+@@ -459,6 +534,14 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -192,12 +206,14 @@ index 40ee5b0..4dc41e0 100644
 +        subq_scope=args.subq_scope,
 +        oracle_gold_file=args.oracle_gold_file,
 +        oracle_edge_mult=args.oracle_edge_mult,
++        oracle_nodes=args.oracle_nodes,
++        oracle_site=args.oracle_site,
 +        exp_beta=args.exp_beta,
 +        edge_stats_file=args.edge_stats_file,
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +586,8 @@ def main():
+@@ -519,6 +602,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -206,7 +222,7 @@ index 40ee5b0..4dc41e0 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +598,9 @@ def main():
+@@ -529,6 +614,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -216,7 +232,7 @@ index 40ee5b0..4dc41e0 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -626,6 +698,19 @@ def main():
+@@ -626,6 +714,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -236,10 +252,72 @@ index 40ee5b0..4dc41e0 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +732,134 @@ def main():
+@@ -647,11 +748,209 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
++    # ----------------------------------------------------------------
++    # Offline-probe export. Dumps the graph and the frozen vectors so the
++    # learnability question -- can any light model beat cosine at telling gold
++    # nodes from the rest? -- can be answered on CPU without a retrieval run.
++    # Exits before retrieval: nothing here needs the LLM.
++    # ----------------------------------------------------------------
++    if args.export_nodes:
++        retriever.prepare()
++
++        _ekeys = list(retriever.entity_node_keys)
++        _erow = {k: i for i, k in enumerate(_ekeys)}
++        _evtx = np.array([retriever.node_name_to_vertex_idx.get(k, -1) for k in _ekeys],
++                         dtype=np.int64)
++
++        # entity -> gold corpus indices, as a COO pair of arrays. A dense
++        # |entities| x |corpus| matrix would be ~10^9 cells for this corpus.
++        _content_to_pid = {_d: _i for _i, _d in enumerate(docs)}
++        _key_to_pid = {}
++        for _k in retriever.passage_node_keys:
++            _pid = _content_to_pid.get(retriever.chunk_store.get_row(_k)["content"])
++            if _pid is not None:
++                _key_to_pid[_k] = _pid
++        _pair_e, _pair_p = [], []
++        for _nk, _cids in retriever.ent_node_to_chunk_ids.items():
++            _r = _erow.get(_nk)
++            if _r is None:
++                continue
++            for _cid in _cids:
++                _pid = _key_to_pid.get(_cid)
++                if _pid is not None:
++                    _pair_e.append(_r)
++                    _pair_p.append(_pid)
++
++        _edges = np.array([(e.source, e.target) for e in builder.graph.es], dtype=np.int64) \
++            if builder.graph.ecount() else np.zeros((0, 2), dtype=np.int64)
++        _ew = np.array(builder.graph.es["weight"], dtype=np.float32) \
++            if builder.graph.ecount() and "weight" in builder.graph.es.attribute_names() \
++            else np.ones(len(_edges), dtype=np.float32)
++
++        os.makedirs(os.path.dirname(os.path.abspath(args.export_nodes)) or ".", exist_ok=True)
++        np.savez_compressed(
++            args.export_nodes,
++            entity_keys=np.array(_ekeys),
++            entity_texts=np.array([retriever.entity_store.get_row(k)["content"] for k in _ekeys]),
++            entity_emb=np.asarray(retriever.entity_embeddings, dtype=np.float32),
++            entity_vertex=_evtx,
++            entity_degree=np.array([builder.graph.degree(int(v)) if v >= 0 else 0
++                                    for v in _evtx], dtype=np.int64),
++            ent_gold_entity=np.array(_pair_e, dtype=np.int64),
++            ent_gold_pid=np.array(_pair_p, dtype=np.int64),
++            passage_vertex=np.array([retriever.node_name_to_vertex_idx.get(k, -1)
++                                     for k in retriever.passage_node_keys], dtype=np.int64),
++            passage_pid=np.array([_key_to_pid.get(k, -1)
++                                  for k in retriever.passage_node_keys], dtype=np.int64),
++            edges=_edges,
++            edge_weight=_ew,
++        )
++        print(f"wrote {args.export_nodes}: {len(_ekeys)} entities, "
++              f"{len(retriever.passage_node_keys)} passages, {len(_edges)} edges, "
++              f"{len(_pair_e)} entity-gold pairs")
++        return
++
 +    # ----------------------------------------------------------------
 +    # Edge-weight probe: resolve the oracle here, the only scope where `docs`
 +    # (and therefore the corpus-index mapping) is in hand.
@@ -281,9 +359,15 @@ index 40ee5b0..4dc41e0 100644
 +                _key = _content_to_key.get(docs[_pid])
 +                if _key is None:
 +                    continue
-+                _vi = retriever.node_name_to_vertex_idx.get(_key)
-+                if _vi is not None:
-+                    _nodes.add(_vi)          # the gold passage node itself
++                # The gold PASSAGE node is also a ranking target, so including it
++                # lets the multiplier pump mass directly into the node being
++                # scored rather than steering traversal toward it. --oracle_nodes
++                # entities drops it and keeps only the extracted entities, which
++                # is the version a learned scorer could in principle imitate.
++                if config.oracle_nodes == "all":
++                    _vi = retriever.node_name_to_vertex_idx.get(_key)
++                    if _vi is not None:
++                        _nodes.add(_vi)
 +                _nodes.update(_chunk_to_entity_idxs.get(_key, ()))   # its entities
 +            if _nodes:
 +                retriever.oracle_nodes_by_q[_q] = _nodes
@@ -292,6 +376,7 @@ index 40ee5b0..4dc41e0 100644
 +        _cov = len(_sizes) / max(len(all_queries), 1)
 +        print(f"oracle: {len(_sizes)}/{len(all_queries)} questions matched "
 +              f"({_cov:.1%}), mean {np.mean(_sizes) if _sizes else 0:.1f} nodes/question, "
++              f"nodes={config.oracle_nodes}, site={config.oracle_site}, "
 +              f"mult={config.oracle_edge_mult}")
 +        # An empty oracle boosts nothing and reproduces vanilla exactly — which is
 +        # precisely the conclusion this run exists to test. Refuse rather than
@@ -342,7 +427,13 @@ index 40ee5b0..4dc41e0 100644
 +    # and the sweep overwrites itself, which is the same footgun the comment
 +    # above records for --subq_file.
 +    if config.oracle_edge_mult != 1.0:
++        # Suffixes only for the non-default scopes, so the completed
++        # vanilla-oracle{10,100,1000} dumps keep the names they already have.
 +        _arm += "-oracle%g" % config.oracle_edge_mult
++        if config.oracle_nodes != "all":
++            _arm += "ent"
++        if config.oracle_site != "edges":
++            _arm += "seed"
 +    if config.qafd_weight_scheme == "exp":
 +        _arm += "-expb%g" % config.exp_beta
 +    if config.qa_sink_gamma:
@@ -371,7 +462,7 @@ index 40ee5b0..4dc41e0 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +920,9 @@ def main():
+@@ -712,7 +1011,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
@@ -383,10 +474,10 @@ index 40ee5b0..4dc41e0 100644
          "graph_type": "passage-entity",
          "dataset": args.dataset,
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
-index d015a39..f2ae90a 100644
+index d015a39..d00bcb7 100644
 --- a/src/passage_entity/config.py
 +++ b/src/passage_entity/config.py
-@@ -57,6 +57,16 @@ class PassageEntityConfig:
+@@ -57,6 +57,19 @@ class PassageEntityConfig:
      qafd_random_seed: int = 42
  
      # ── Query-aware enhancements (all default = original behaviour) ────────
@@ -397,6 +488,9 @@ index d015a39..f2ae90a 100644
 +    # Edge-weight probe. Defaults reproduce the original algorithm exactly.
 +    oracle_gold_file: Optional[str] = None  # {normalised question: [corpus_idx, ...]}
 +    oracle_edge_mult: float = 1.0           # 1.0 = oracle off
++    oracle_nodes: str = "all"               # "all" = gold passages + their entities
++                                            # "entities" = entities only, no passage node
++    oracle_site: str = "edges"              # "edges" = diffusion weights, "seeds" = source mass
 +    exp_beta: float = 0.0                   # used only by qafd_weight_scheme="exp"
 +    edge_stats_file: Optional[str] = None   # routing-contrast instrumentation dump
 +
@@ -659,7 +753,7 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..6202c20 100644
+index e2b2da2..638387d 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
 @@ -83,6 +83,13 @@ class PassageEntityRetriever:
@@ -753,7 +847,30 @@ index e2b2da2..6202c20 100644
          return min_max_normalize(scores)
  
      # ------------------------------------------------------------------
-@@ -322,7 +380,18 @@ class PassageEntityRetriever:
+@@ -308,6 +366,22 @@ class PassageEntityRetriever:
+ 
+         node_weights = phrase_weights + passage_weights
+ 
++        # Oracle vertices for this question. Resolved once by benchmark_runner and
++        # keyed by the exact query string, so there is no per-query normalisation
++        # and no mbuzai import on the hot path.
++        oracle_nodes = self.oracle_nodes_by_q.get(query) if self.oracle_nodes_by_q else None
++
++        # Seeding-site oracle: the ceiling for candidate selection, so it can be
++        # compared against the propagation ceiling on equal terms. Applied to the
++        # source mass rather than the edge weights; a seed with zero weight stays
++        # zero, since the multiplier scales what seeding already found rather than
++        # introducing seeds of its own.
++        if oracle_nodes and getattr(self.config, "oracle_site", "edges") == "seeds" \
++                and self.config.oracle_edge_mult != 1.0:
++            for _vi in oracle_nodes:
++                if 0 <= _vi < len(node_weights):
++                    node_weights[_vi] *= self.config.oracle_edge_mult
++
+         if np.sum(node_weights) == 0:
+             logger.warning("All node weights are zero after seed selection, falling back to DPR")
+             return dpr_ids, dpr_scores
+@@ -322,7 +396,18 @@ class PassageEntityRetriever:
                  if i < len(self.passage_embeddings):
                      self._node_emb_dict[nk] = self.passage_embeddings[i]
  
@@ -765,20 +882,20 @@ index e2b2da2..6202c20 100644
 +        else:
 +            query_emb = self._query_emb_fact.get(query)
 +
-+        # Oracle edge weights: which vertices sit inside this question's gold
-+        # passages. Keyed by the exact query string benchmark_runner will pass —
-+        # it resolves the normalised-question lookup once at setup, so there is
-+        # no per-query normalisation and no mbuzai import on the hot path.
-+        oracle_nodes = self.oracle_nodes_by_q.get(query) if self.oracle_nodes_by_q else None
++        # The diffusion only sees the oracle when the multiplier belongs to the
++        # edge site; under --oracle_site seeds it has already been spent on the
++        # source mass above, and passing it here too would apply it twice.
++        edge_oracle = oracle_nodes \
++            if getattr(self.config, "oracle_site", "edges") == "edges" else None
  
          # --- Run QAFD ---
          qafd_start = time.time()
-@@ -348,6 +417,10 @@ class PassageEntityRetriever:
+@@ -348,6 +433,10 @@ class PassageEntityRetriever:
              qa_accum_gamma=self.config.qa_accum_gamma,
              qa_post_lambda=self.config.qa_post_lambda,
              batch_push=self.config.batch_push,
 +            exp_beta=self.config.exp_beta,
-+            oracle_nodes=oracle_nodes,
++            oracle_nodes=edge_oracle,
 +            oracle_edge_mult=self.config.oracle_edge_mult,
 +            edge_stats=self.edge_stats,
          )
