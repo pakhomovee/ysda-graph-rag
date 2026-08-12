@@ -85,6 +85,13 @@ ST_DEVICE=${ST_DEVICE:-cpu}   # query encoder; cpu keeps the GPU entirely for vL
 ALPHA=${ALPHA:-1.5}
 MAXITER=${MAXITER:-500}
 BATCH_PUSH=${BATCH_PUSH:-}
+
+# SHARDS splits one arm's question set across independent processes. Retrieval is
+# a sequential loop over independent questions, so at the paper's alpha the wall
+# time is per-question diffusion in pure Python and this is the only way to use
+# more than one core within an arm. Shards are strided, so each covers the same
+# mix of hop depths, and the dumps are merged back into the canonical arm name.
+SHARDS=${SHARDS:-1}
 ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 accum4"}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -208,9 +215,11 @@ SUFFIX=""
 [ "$(printf '%g' "$ALPHA")" != "1.5" ] && SUFFIX="${SUFFIX}-a$(printf '%g' "$ALPHA")"
 [ -n "$BATCH_PUSH" ] && SUFFIX="${SUFFIX}-bp"
 
-run_arm () {
-    local name=$1; shift
-    local log="$ROOT/out/probe_${OURS}_${name}${SUFFIX}.log"
+# One shard of one arm.
+run_shard () {
+    local name=$1 shard=$2; shift 2
+    local tag="${name}${SUFFIX}"
+    local log="$ROOT/out/probe_${OURS}_${tag}${shard:+.shard${shard/\//of}}.log"
     # By path, NOT `python -m src.passage_entity.benchmark_runner`. The runner
     # sidesteps src/__init__.py — which imports aioboto3 and the rest of the AWS
     # stack — by registering src/* as plain namespace packages in sys.modules
@@ -231,10 +240,45 @@ run_arm () {
         ${BATCH_PUSH:+--batch_push} \
         --skip_qa \
         ${NUM_QUERIES:+--num_queries "$NUM_QUERIES"} \
-        --edge_stats_file "$ROOT/out/edgestats_${OURS}_${name}${SUFFIX}.json" \
+        ${shard:+--query_shard "$shard"} \
+        --edge_stats_file "$ROOT/out/edgestats_${OURS}_${tag}${shard:+.shard${shard/\//of}}.json" \
         "$@" ) >"$log" 2>&1 \
-        && echo "    done: $name" \
-        || { echo "    FAILED: $name — see $log" >&2; return 1; }
+        && echo "    done: $name${shard:+ shard $shard}" \
+        || { echo "    FAILED: $name${shard:+ shard $shard} — see $log" >&2; return 1; }
+}
+
+# All shards of one arm, then merge their dumps into the canonical arm name so
+# score_qafd.py sees one run. The dumps are {qid: [pids]} and the shards are
+# disjoint by construction, so the merge is a plain dict union.
+run_arm () {
+    local name=$1; shift
+    if [ "$SHARDS" -le 1 ]; then
+        run_shard "$name" "" "$@"
+        return
+    fi
+    local rc=0 i
+    for i in $(seq 0 $((SHARDS - 1))); do
+        run_shard "$name" "$i/$SHARDS" "$@" &
+    done
+    while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n || rc=1; done
+    [ "$rc" -eq 0 ] || return 1
+    $PY_MBUZAI - "$WORKDIR" "$OURS" "${name}${SUFFIX}" "$SHARDS" <<'PYEOF'
+import json, sys, os
+workdir, ds, tag, n = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+merged, seen = {}, 0
+for i in range(n):
+    part = os.path.join(workdir, f"qafd_{ds}_{tag}.shard{i}of{n}.json")
+    with open(part) as f:
+        d = json.load(f)
+    seen += len(d)
+    merged.update(d)
+if len(merged) != seen:
+    raise SystemExit(f"FATAL: shards overlap — {seen} rows collapsed to {len(merged)}")
+dest = os.path.join(workdir, f"qafd_{ds}_{tag}.json")
+with open(dest, "w") as f:
+    json.dump(merged, f)
+print(f"    merged {n} shards -> {os.path.basename(dest)} ({len(merged)} questions)")
+PYEOF
 }
 
 arm_flags () {   # arm name -> benchmark_runner flags

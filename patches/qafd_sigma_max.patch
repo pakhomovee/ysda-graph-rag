@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..47af503 100644
+index 40ee5b0..6dab21e 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -160,7 +160,7 @@ index 40ee5b0..47af503 100644
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,37 @@ def main():
+@@ -426,6 +470,40 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -191,6 +191,9 @@ index 40ee5b0..47af503 100644
 +                        help="with --qafd_weight_scheme exp: w * exp(beta * (s_u + s_v))")
 +    parser.add_argument("--edge_stats_file", type=str, default=None,
 +                        help="dump routing-contrast instrumentation here")
++    parser.add_argument("--query_shard", type=str, default=None,
++                        help="I/N: run only questions I, I+N, I+2N, ... Shards are "
++                             "independent processes; merge the dumps afterwards")
 +    parser.add_argument("--export_nodes", type=str, default=None,
 +                        help="dump graph + frozen vectors to this .npz for the offline "
 +                             "learnability probe, then exit before retrieval")
@@ -198,7 +201,7 @@ index 40ee5b0..47af503 100644
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +534,14 @@ def main():
+@@ -459,6 +537,14 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -213,7 +216,7 @@ index 40ee5b0..47af503 100644
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +602,8 @@ def main():
+@@ -519,6 +605,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -222,7 +225,7 @@ index 40ee5b0..47af503 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +614,9 @@ def main():
+@@ -529,6 +617,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -232,7 +235,31 @@ index 40ee5b0..47af503 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -626,6 +714,19 @@ def main():
+@@ -608,6 +699,23 @@ def main():
+         except Exception:
+             gold_docs = None
+ 
++    # Query sharding. Retrieval is a sequential loop over independent questions,
++    # so at the paper's alpha the wall time is entirely per-question diffusion and
++    # the only way to use more than one core is to split the question set. Strided
++    # rather than contiguous so every shard sees the same mix of hop depths and
++    # a partial sweep is still representative.
++    if args.query_shard:
++        _i, _n = (int(x) for x in args.query_shard.split("/"))
++        if not (0 <= _i < _n):
++            raise SystemExit(f"--query_shard {args.query_shard}: need 0 <= i < n")
++        all_queries = all_queries[_i::_n]
++        samples = samples[_i::_n]
++        if gold_docs is not None:
++            gold_docs = gold_docs[_i::_n]
++        if gold_answers is not None:
++            gold_answers = gold_answers[_i::_n]
++        print(f"  shard {_i}/{_n}: {len(all_queries)} questions")
++
+     print("=" * 70)
+     print(f"  Graph type:  passage-entity")
+     print(f"  Task:        {args.task}")
+@@ -626,6 +734,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -252,7 +279,7 @@ index 40ee5b0..47af503 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +748,217 @@ def main():
+@@ -647,11 +768,219 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -448,6 +475,8 @@ index 40ee5b0..47af503 100644
 +        _arm += "-a%g" % config.qafd_alpha
 +    if config.batch_push:
 +        _arm += "-bp"
++    if args.query_shard:
++        _arm += ".shard%s" % args.query_shard.replace("/", "of")
 +    _dump_path = os.path.join(config.working_dir, f"qafd_{args.dataset}_{_arm}.json")
 +    with open(_dump_path, "w") as _f:
 +        json.dump(_dump, _f)
@@ -470,7 +499,7 @@ index 40ee5b0..47af503 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1019,9 @@ def main():
+@@ -712,7 +1041,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
