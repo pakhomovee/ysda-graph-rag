@@ -1,9 +1,9 @@
 diff --git a/src/embedding_models/STEncoder.py b/src/embedding_models/STEncoder.py
 new file mode 100644
-index 0000000..79aeac4
+index 0000000..f731c87
 --- /dev/null
 +++ b/src/embedding_models/STEncoder.py
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,59 @@
 +"""Generic sentence-transformers encoder for QAFD-RAG.
 +
 +Added so QAFD can run on the SAME encoder as the rest of the comparison
@@ -18,6 +18,7 @@ index 0000000..79aeac4
 +
 +from typing import List, Optional
 +import logging
++import os
 +
 +import numpy as np
 +
@@ -34,8 +35,19 @@ index 0000000..79aeac4
 +        )
 +        from sentence_transformers import SentenceTransformer
 +
-+        logger.info(f"Initializing sentence-transformers: {self.embedding_model_name}")
-+        self.embedding_model = SentenceTransformer(self.embedding_model_name)
++        # SentenceTransformer grabs CUDA whenever it is visible. At retrieval time
++        # this encoder only ever encodes the queries — passage/entity/fact vectors
++        # come from the cached index — so a few thousand short strings, which CPU
++        # handles in seconds. That matters when several arms run concurrently
++        # against a box whose GPU is already fully committed to vLLM: N copies of
++        # mpnet competing for the leftover VRAM is the one way this OOMs.
++        #
++        #     MBUZAI_ST_DEVICE=cpu    keep the GPU entirely for vLLM
++        #     unset                   sentence-transformers' own default (CUDA if present)
++        _device = os.environ.get("MBUZAI_ST_DEVICE") or None
++        logger.info(f"Initializing sentence-transformers: {self.embedding_model_name}"
++                    f"{f' on {_device}' if _device else ''}")
++        self.embedding_model = SentenceTransformer(self.embedding_model_name, device=_device)
 +        self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
 +        self.batch_size = getattr(global_config, "embedding_batch_size", 32)
 +        self.normalize = getattr(global_config, "embedding_return_as_normalized", True)
@@ -70,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..574edbd 100644
+index 40ee5b0..4dc41e0 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -359,6 +371,17 @@ index 40ee5b0..574edbd 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
+@@ -712,7 +920,9 @@ def main():
+     # Save results
+     # ----------------------------------------------------------------
+     os.makedirs(config.working_dir, exist_ok=True)
+-    results_path = os.path.join(config.working_dir, f"results_{args.dataset}.json")
++    # Arm-scoped, like the sidecar dump above. Concurrent arms all wrote this one
++    # path, so a parallel sweep raced here and could leave a half-written file.
++    results_path = os.path.join(config.working_dir, f"results_{args.dataset}_{_arm}.json")
+     output = {
+         "graph_type": "passage-entity",
+         "dataset": args.dataset,
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
 index d015a39..f2ae90a 100644
 --- a/src/passage_entity/config.py

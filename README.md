@@ -99,6 +99,16 @@ from `/models`. That id also selects the index directory (`<save_dir>/<llm>_<emb
 so if the server is now serving something other than what indexed the corpus, set
 `LOCAL_LLM_MODEL` explicitly — the preflight prints the directories it can see.
 
+Arms run concurrently (`JOBS`, default 4). Retrieval is sequential *inside* one
+arm — one query at a time, one reranker call per query — so a single run leaves
+vLLM nearly idle however much it could serve; concurrency across arms is what
+fills it, with no change to their retrieval loop. Pick `JOBS` from the per-run log
+line `Retrieval done. total=Xs, rerank=Ys, qafd=Zs`: if `rerank ≈ total` the LLM
+binds and `JOBS` can go high, if `qafd ≈ total` the pure-Python push-relabel binds
+and `JOBS` should stay near the core count. Each process holds its own copy of the
+index, so watch RAM. Query encoding is pinned to CPU (`ST_DEVICE`) so N copies of
+mpnet don't compete with vLLM for VRAM.
+
 ### The edge-weight probe
 
 `σ_max` on QAFD's diffusion edge weights is null. That has two incompatible

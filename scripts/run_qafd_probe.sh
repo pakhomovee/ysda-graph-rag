@@ -47,6 +47,20 @@ LLM_MODEL=${LLM_MODEL:-${LOCAL_LLM_MODEL:-}}
 LLM_BASE_URL=${LLM_BASE_URL:-${LOCAL_LLM_BASE_URL:-}}
 LLM_API_KEY=${LLM_API_KEY:-${LOCAL_LLM_API_KEY:-dummy}}   # vLLM ignores it, the client requires it
 PORTS=${PORTS:-"5679 5678 8000"}  # probed in order when no base URL is set
+
+# Arms run as concurrent processes. Retrieval is sequential inside one arm — one
+# query at a time, one reranker call per query — so a single run leaves vLLM
+# almost idle no matter how much it could serve. Concurrency across arms is what
+# fills it, and needs no changes to their retrieval loop.
+#
+# Pick JOBS from whichever resource binds. The per-run log line
+#   "Retrieval done. total=Xs, rerank=Ys, qafd=Zs"
+# says which: rerank ~ total means the LLM is the bottleneck and JOBS can go high
+# (vLLM batches happily); qafd ~ total means the pure-Python push-relabel is, and
+# JOBS should stay near the core count. Each process also holds its own copy of
+# the index, so watch RAM before raising it.
+JOBS=${JOBS:-4}
+ST_DEVICE=${ST_DEVICE:-cpu}   # query encoder; cpu keeps the GPU entirely for vLLM
 ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 accum4"}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,13 +136,9 @@ $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 
 run_arm () {
     local name=$1; shift
-    local dump="$WORKDIR/qafd_${OURS}_${name}.json"
-    if [ -f "$dump" ] && [ -z "${FORCE:-}" ]; then
-        echo "    $name: have $(basename "$dump"), skipping (FORCE=1 to rerun)"
-        return
-    fi
-    echo "    $name"
-    ( cd "$SUB" && PYTHONPATH="$ROOT:${PYTHONPATH:-}" $PY -m src.passage_entity.benchmark_runner \
+    local log="$ROOT/out/probe_${OURS}_${name}.log"
+    ( cd "$SUB" && PYTHONPATH="$ROOT:${PYTHONPATH:-}" MBUZAI_ST_DEVICE="$ST_DEVICE" \
+      $PY -m src.passage_entity.benchmark_runner \
         --dataset $OURS \
         --save_dir "$SAVE_DIR" \
         --llm_model "$LLM_MODEL" \
@@ -138,21 +148,54 @@ run_arm () {
         --retrieval_top_k "$TOPK" \
         --skip_qa \
         --edge_stats_file "$ROOT/out/edgestats_${OURS}_${name}.json" \
-        "$@" )
+        "$@" ) >"$log" 2>&1 \
+        && echo "    done: $name" \
+        || { echo "    FAILED: $name — see $log" >&2; return 1; }
 }
 
-echo "==> arms"
-for arm in $ARMS; do
-    case $arm in
-        vanilla)   run_arm vanilla ;;
-        oracle*)   run_arm "$arm" --oracle_gold_file "$ORACLE" \
-                       --oracle_edge_mult "${arm#oracle}" ;;
-        expb*)     run_arm "$arm" --qafd_weight_scheme exp --exp_beta "${arm#expb}" ;;
-        sink*)     run_arm "$arm" --qa_sink_gamma "${arm#sink}" ;;
-        accum*)    run_arm "$arm" --qa_accum_gamma "${arm#accum}" ;;
-        *)         echo "unknown arm: $arm" >&2; exit 1 ;;
+arm_flags () {   # arm name -> benchmark_runner flags
+    case $1 in
+        vanilla)   ;;
+        oracle*)   printf '%s\n' --oracle_gold_file "$ORACLE" --oracle_edge_mult "${1#oracle}" ;;
+        expb*)     printf '%s\n' --qafd_weight_scheme exp --exp_beta "${1#expb}" ;;
+        sink*)     printf '%s\n' --qa_sink_gamma "${1#sink}" ;;
+        accum*)    printf '%s\n' --qa_accum_gamma "${1#accum}" ;;
+        *)         echo "unknown arm: $1" >&2; return 1 ;;
     esac
+}
+
+echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE)"
+PENDING=()
+for arm in $ARMS; do
+    arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
+    dump="$WORKDIR/qafd_${OURS}_${arm}.json"
+    if [ -f "$dump" ] && [ -z "${FORCE:-}" ]; then
+        echo "    have $(basename "$dump"), skipping (FORCE=1 to rerun)"
+    else
+        PENDING+=("$arm")
+    fi
 done
+
+if [ ${#PENDING[@]} -gt 0 ]; then
+    echo "    running: ${PENDING[*]}"
+    started=0
+    for arm in "${PENDING[@]}"; do
+        # `|| true`: wait -n reports the finished job's status, and under set -e a
+        # bare one would abort the whole sweep the moment any single arm failed.
+        # Failures are counted in the drain loop below and reported together.
+        while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n || true; done
+        mapfile -t flags < <(arm_flags "$arm")
+        run_arm "$arm" "${flags[@]}" &
+        started=$((started + 1))
+        # Each process loads the whole index (graph + entity/passage/fact vectors)
+        # before it does any work. Starting them in lockstep means every copy of
+        # that read lands at once; a short stagger keeps the box responsive.
+        [ "$started" -lt "${#PENDING[@]}" ] && sleep "${STAGGER:-20}"
+    done
+    fails=0
+    while [ "$(jobs -rp | wc -l)" -gt 0 ]; do wait -n || fails=$((fails + 1)); done
+    [ "$fails" -eq 0 ] || { echo "$fails arm(s) failed — see out/probe_${OURS}_*.log" >&2; exit 1; }
+fi
 
 echo "==> did the weights steer anything? (read this FIRST)"
 $PY_MBUZAI "$ROOT/scripts/report_edge_contrast.py" "$ROOT"/out/edgestats_${OURS}_*.json
