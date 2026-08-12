@@ -122,6 +122,7 @@ ARMS=${ARMS:-"vanilla oracle10 oracle100 oracle1000 expb2 expb8 expb32 sink4 acc
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/third_party/QAFD-RAG"
 ORACLE="$ROOT/out/qafd_oracle_${OURS}.json"
+SUBQ=${SUBQ:-$ROOT/out/subq_${OURS}_generated_bytext.json}
 
 echo "==> preflight"
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
@@ -252,7 +253,14 @@ SUFFIX=""
 # here is what broke the merge; keep ONE definition of it.
 dump_stem () {
     local name=$1
-    if [ "$name" = vanilla ]; then echo "vanilla${SUFFIX}"; else echo "vanilla-${name}${SUFFIX}"; fi
+    case $name in
+        # With --subq_file the runner names the arm "<scope>-<queryset>" instead
+        # of starting from "vanilla".
+        subqedges) echo "edges-generated${SUFFIX}" ;;
+        subqseeds) echo "seeds-generated${SUFFIX}" ;;
+        vanilla)   echo "vanilla${SUFFIX}" ;;
+        *)         echo "vanilla-${name}${SUFFIX}" ;;
+    esac
 }
 
 run_shard () {
@@ -351,6 +359,9 @@ arm_flags () {   # arm name -> benchmark_runner flags
             printf '%s\n' --oracle_gold_file "$ORACLE" --oracle_edge_mult "$mult"
             case $a in *ent*)  printf '%s\n' --oracle_nodes entities ;; esac
             case $a in *seed*) printf '%s\n' --oracle_site  seeds    ;; esac ;;
+        # The sigma_max arms: the query set applied at propagation vs selection.
+        subqedges) printf '%s\n' --subq_file "$SUBQ" --subq_scope edges ;;
+        subqseeds) printf '%s\n' --subq_file "$SUBQ" --subq_scope seeds ;;
         expb*)     printf '%s\n' --qafd_weight_scheme exp --exp_beta "${a#expb}" ;;
         sink*)     printf '%s\n' --qa_sink_gamma "${a#sink}" ;;
         accum*)    printf '%s\n' --qa_accum_gamma "${a#accum}" ;;
