@@ -27,8 +27,20 @@ Split is by QUESTION (default 700/300) and every number is reported on held-out
 questions. Implemented in numpy so the probe has no dependency beyond what the
 analysis env already has.
 
+**Negatives are drawn from other questions' gold entities**, using one
+distribution for training, early stopping and evaluation. Uniform-random
+negatives do not work: a gold entity is a real, well-connected extraction while a
+random draw from 85k is mostly OpenIE debris, so a model can score by learning
+"this looks like a gold entity" without consulting the query at all. That is not
+a hypothetical — it is what the first version of this script did, and the shuffle
+control caught it at AUC 0.60-0.63 where chance is 0.50. Sampling negatives from
+the gold pool matches the nuisance distribution exactly, because a negative here
+IS a positive for some other question.
+
+Always run the control first; it is a gate, not a formality:
+
+    python scripts/probe_learnability.py musique --shuffle-control   # must be ~0.50
     python scripts/probe_learnability.py musique
-    python scripts/probe_learnability.py musique --shuffle-control
 
 Note on `sim_mode`: "normalized", "relu" and "relu_sq" are all monotone in cosine,
 so they produce *identical* rankings and identical AUC/recall. They matter inside
@@ -234,6 +246,18 @@ class MLP:
 
 # ---------------------------------------------------------------------------
 
+def sample_from_pool(pool, pos, k, rng):
+    """k entities from `pool`, excluding this question's positives.
+
+    Module level so the regression test can drive it directly: the negative
+    distribution is where this probe got its first answer wrong, and it is the
+    part most worth pinning down.
+    """
+    take = min(k + len(pos) + 16, len(pool))
+    block = rng.choice(pool, size=take, replace=False)
+    return block[~np.isin(block, pos)][:k]
+
+
 def roc_auc(scores, labels):
     """Rank-based AUC. Ties get average rank, so a constant scorer gives 0.5."""
     pos, neg = labels.sum(), len(labels) - labels.sum()
@@ -329,21 +353,39 @@ def main():
     tr, te = order[:args.train_questions], order[args.train_questions:]
     print(f"split: {len(tr)} train questions, {len(te)} held out\n")
 
-    # ---- training rows: all positives + random negatives + cosine-mined hard ----
-    # Hard negatives are mined for TRAINING only. Using them at eval too would
-    # hand cosine the hardest cases it chose itself and bias the comparison.
+    # ---- negative pool ------------------------------------------------------
+    # Negatives are drawn from OTHER questions' gold entities, and the same pool
+    # is used for training, early stopping and evaluation. Both earlier choices
+    # were wrong, and the shuffle control caught both:
+    #
+    #   Uniform-random negatives are separable without the query at all. A gold
+    #   entity is a real, well-formed, well-connected extraction; a uniform draw
+    #   from 85k entities is mostly OpenIE debris. A model can score by learning
+    #   "this looks like a gold entity", which survives permuting the labels --
+    #   the control reported AUC 0.60-0.63 where it must report 0.50. Drawing
+    #   negatives from the gold pool matches that nuisance distribution exactly:
+    #   a negative here IS a positive, for a different question, so the only
+    #   thing separating them is the query.
+    #
+    #   Mining hard negatives for training but evaluating against random ones
+    #   also gave train and test different negative distributions. A model
+    #   trained where high cosine usually means a mined negative learns to
+    #   distrust high cosine, and then inverts on a random pool -- which is how
+    #   `diagonal` reached 0.4258, below chance. One distribution everywhere.
+    pool = np.array(sorted({int(e) for p in positives for e in p}), dtype=np.int64)
+    print(f"negative pool: {len(pool)} entities that are gold for some question")
+    if len(pool) < 10 * args.neg_per_q:
+        sys.exit("negative pool too small to sample from without heavy repetition")
+
+    def sample_negatives(pos, k):
+        return sample_from_pool(pool, pos, k, rng)
+
     He, Hq, Y, Dg, Qi = [], [], [], [], []
     for i in tr:
         pos = positives[i]
-        mask = np.ones(n_ent, dtype=bool)
-        mask[pos] = False
-        cand = np.flatnonzero(mask)
-        rand_neg = rng.choice(cand, size=min(args.neg_per_q, len(cand)), replace=False)
-        cos_all = ent_emb @ q_emb[i]
-        cos_all[pos] = -np.inf
-        hard_neg = np.argpartition(-cos_all, args.neg_per_q)[:args.neg_per_q]
-        rows = np.concatenate([pos, rand_neg, hard_neg])
-        lab = np.concatenate([np.ones(len(pos)), np.zeros(len(rand_neg) + len(hard_neg))])
+        neg = sample_negatives(pos, 2 * args.neg_per_q)
+        rows = np.concatenate([pos, neg])
+        lab = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
         He.append(ent_emb[rows]); Hq.append(np.repeat(q_emb[i][None], len(rows), 0))
         Y.append(lab); Dg.append(ent_deg[rows])
         Qi.append(np.full(len(rows), i))
@@ -368,10 +410,7 @@ def main():
     per_q = {m.name: {"auc": [], "r10": [], "r50": []} for m in models}
     for i in te:
         pos = positives[i]
-        mask = np.ones(n_ent, dtype=bool)
-        mask[pos] = False
-        cand = np.flatnonzero(mask)
-        neg = rng.choice(cand, size=min(args.pool, len(cand)), replace=False)
+        neg = sample_negatives(pos, args.pool)   # same distribution as training
         rows = np.concatenate([pos, neg])
         lab = np.concatenate([np.ones(len(pos)), np.zeros(len(neg))])
         he, dg = ent_emb[rows], ent_deg[rows]
@@ -404,6 +443,21 @@ def main():
             cells.append(f"{np.mean(dvals):+.4f} [{lo:+.3f},{hi:+.3f}]{star}")
         print(f"{m.name:<12}" + "".join(f"{c:>22}" for c in cells))
     print("  * = CI excludes zero")
+
+    # The control is a gate, not a suggestion. With the gold sets permuted there is
+    # no question-entity relationship left, so anything scoring above chance is
+    # reading a nuisance correlate of "is a gold entity" and every number in the
+    # real run is contaminated by the same thing. Say so loudly.
+    if args.shuffle_control:
+        worst = max(float(np.nanmean(per_q[m.name]["auc"])) for m in models)
+        if worst > 0.55:
+            print(f"\n*** CONTROL FAILED: best AUC {worst:.4f} on permuted labels "
+                  "(expected ~0.50).\n"
+                  "    Some model is scoring without using the question. Do NOT read\n"
+                  "    the main run until the negative sampling accounts for it.")
+        else:
+            print(f"\ncontrol passed: best AUC on permuted labels {worst:.4f} (~0.50). "
+                  "The main run is readable.")
 
     dest = OUT / f"probe_learnability_{args.dataset}"
     dest = dest.with_name(dest.name + ("_shuffled" if args.shuffle_control else "") + ".json")
