@@ -137,8 +137,14 @@ $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 run_arm () {
     local name=$1; shift
     local log="$ROOT/out/probe_${OURS}_${name}.log"
+    # By path, NOT `python -m src.passage_entity.benchmark_runner`. The runner
+    # sidesteps src/__init__.py — which imports aioboto3 and the rest of the AWS
+    # stack — by registering src/* as plain namespace packages in sys.modules
+    # before importing anything from them. With -m, Python imports the real `src`
+    # package to locate the submodule, so __init__.py runs first and the bypass
+    # never gets the chance: ModuleNotFoundError: aioboto3.
     ( cd "$SUB" && PYTHONPATH="$ROOT:${PYTHONPATH:-}" MBUZAI_ST_DEVICE="$ST_DEVICE" \
-      $PY -m src.passage_entity.benchmark_runner \
+      $PY src/passage_entity/benchmark_runner.py \
         --dataset $OURS \
         --save_dir "$SAVE_DIR" \
         --llm_model "$LLM_MODEL" \
