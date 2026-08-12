@@ -141,9 +141,16 @@ are cheaper than training a scorer:
 ARMS="oracle1000ent oracle100ent oracle1000seed" JOBS=3 bash scripts/run_qafd_probe.sh
 
 # the oracle shows "if you knew, it would help". can you know?
-bash scripts/export_qafd_nodes.sh                  # QAFD env, no LLM
-python scripts/probe_learnability.py musique       # mbuzai env, CPU, minutes
+bash scripts/export_qafd_nodes.sh    # QAFD env, no LLM
+bash scripts/run_probe.sh            # mbuzai env, CPU; control + real, in parallel
 ```
+
+`run_probe.sh` runs all six trainings at once — 3 models × {control, real} — and
+sizes BLAS threads per worker from `nproc`. That has to happen before Python
+starts, since OpenBLAS fixes its pool size when numpy is imported, and BLAS
+scaling on these shapes flattens long before 96 threads: 6 workers × 16 threads
+beats 1 × 96 comfortably. It refuses to let you read the real run if the control
+failed.
 
 `probe_learnability.py` asks whether any light model — a learned diagonal metric, a
 low-rank correction to cosine, or an MLP over `[h_e⊙h_q, |h_e−h_q|, cos, deg]` — beats

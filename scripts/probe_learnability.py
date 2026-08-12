@@ -51,7 +51,9 @@ here, not three.
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -246,6 +248,19 @@ class MLP:
 
 # ---------------------------------------------------------------------------
 
+# Training inputs, published to forked workers. Populated before the pool is
+# created so children inherit them copy-on-write: at d=768 the row blocks are
+# hundreds of MB and pickling them to each worker would cost more than the
+# training it parallelises.
+_SHARED = {}
+
+
+def _train_one(model):
+    """Fit one model in a worker. Only the parameters travel back."""
+    return fit_early_stop(model, _SHARED["He"], _SHARED["Hq"], _SHARED["Y"],
+                          _SHARED["Dg"], _SHARED["val"], lr=_SHARED["lr"])
+
+
 def sample_from_pool(pool, pos, k, rng):
     """k entities from `pool`, excluding this question's positives.
 
@@ -290,6 +305,8 @@ def main():
     ap.add_argument("--neg-per-q", type=int, default=40, help="training negatives")
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lr", type=float, default=0.01)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="train the 3 models concurrently. Set BLAS threads per\nworker with OMP_NUM_THREADS before launching; scripts/run_probe.sh does both")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--shuffle-control", action="store_true",
                     help="pair each question with another question's gold. Every "
@@ -399,12 +416,31 @@ def main():
     print(f"training rows: {len(Y)} ({int(Y.sum())} positive), "
           f"{val.sum()} held out for early stopping ({len(val_q)} questions)")
 
-    models = [Cosine()]
-    for m in (Diagonal(d, seed=args.seed),
-              LowRank(d, r=args.rank, seed=args.seed),
-              MLP(d, seed=args.seed)):
-        models.append(fit_early_stop(m, He, Hq, Y, Dg, val, lr=args.lr))
+    _SHARED.update(He=He, Hq=Hq, Y=Y, Dg=Dg, val=val, lr=args.lr)
+    todo = [Diagonal(d, seed=args.seed),
+            LowRank(d, r=args.rank, seed=args.seed),
+            MLP(d, seed=args.seed)]
+
+    t0 = time.time()
+    if args.jobs > 1:
+        # fork, not spawn: the workers must inherit _SHARED rather than receive
+        # it. BLAS threading is inherited too, so the driver sets
+        # OMP_NUM_THREADS before python starts -- changing it here would be too
+        # late, the thread pool is sized at import.
+        import concurrent.futures as cf
+        import multiprocessing as mp
+        with cf.ProcessPoolExecutor(max_workers=min(args.jobs, len(todo)),
+                                    mp_context=mp.get_context("fork")) as ex:
+            trained = list(ex.map(_train_one, todo))
+    else:
+        trained = [_train_one(m) for m in todo]
+
+    models = [Cosine()] + trained
+    for m in trained:
         print(f"  {m.name:<10} best val AUC {m.val_auc:.4f}")
+    print(f"  trained in {time.time() - t0:.0f}s "
+          f"({'parallel, %d workers' % min(args.jobs, len(todo)) if args.jobs > 1 else 'sequential'}, "
+          f"{os.environ.get('OMP_NUM_THREADS', 'default')} BLAS threads each)")
 
     # ---- eval on held-out questions, identical candidate pool per model ----
     per_q = {m.name: {"auc": [], "r10": [], "r50": []} for m in models}
