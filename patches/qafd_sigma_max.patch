@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..9588699 100644
+index 40ee5b0..f5a5cb0 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -240,7 +240,24 @@ index 40ee5b0..9588699 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -608,6 +704,23 @@ def main():
+@@ -536,7 +632,15 @@ def main():
+             raise ValueError(f"Unknown embedding model: {emb_key}")
+         async def embed_func(texts):
+             return np.array(_local_model.batch_encode(texts))
+-    embedding_model = EmbeddingModelWrapper(embed_func, batch_size=config.embedding_batch_size)
++    # sentence-transformers checkpoints are not instruction-tuned, so the query
++    # instruction must not be prepended to their input; every other encoder in
++    # the registry expects it.
++    _instr_ok = not (emb_key == "mpnet" or str(emb_key).startswith("sentence-transformers/"))
++    embedding_model = EmbeddingModelWrapper(embed_func, batch_size=config.embedding_batch_size,
++                                            supports_instruction=_instr_ok)
++    if not _instr_ok:
++        print(f"embedding: {emb_key} is not instruction-tuned — "
++              "query instructions will NOT be prepended")
+ 
+     # ----------------------------------------------------------------
+     # Load data
+@@ -608,6 +712,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -264,7 +281,7 @@ index 40ee5b0..9588699 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +739,19 @@ def main():
+@@ -626,6 +747,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -284,7 +301,7 @@ index 40ee5b0..9588699 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +773,235 @@ def main():
+@@ -647,11 +781,235 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -520,7 +537,7 @@ index 40ee5b0..9588699 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1062,9 @@ def main():
+@@ -712,7 +1070,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
@@ -556,6 +573,37 @@ index d015a39..e9916a3 100644
      sim_mode: str = "normalized"     # Similarity contrast: "normalized", "relu", "relu_sq"
      qa_sink_gamma: float = 0.0       # Query-aware sink capacity (0=off)
      qa_warm_delta: float = 0.0       # Query-aware seed bias (0=off)
+diff --git a/src/passage_entity/embedding_store.py b/src/passage_entity/embedding_store.py
+index ca82f56..92c3ddc 100644
+--- a/src/passage_entity/embedding_store.py
++++ b/src/passage_entity/embedding_store.py
+@@ -34,9 +34,16 @@ class EmbeddingModelWrapper:
+         Max texts per call.
+     """
+ 
+-    def __init__(self, embed_func: Callable, batch_size: int = 16):
++    def __init__(self, embed_func: Callable, batch_size: int = 16,
++                 supports_instruction: bool = True):
+         self._embed_func = embed_func
+         self.batch_size = batch_size
++        # Instructions are PREPENDED to the text below, which is what NV-Embed-v2
++        # and GritLM expect. A plain sentence-transformers encoder is not
++        # instruction-tuned: it reads the instruction as ordinary content, which
++        # shifts the query vector away from passages that were indexed without
++        # one. Measured cost on mpnet/MuSiQue: recall@10 0.5733 -> 0.4833.
++        self.supports_instruction = supports_instruction
+ 
+     # ------------------------------------------------------------------
+     def batch_encode(self, texts, instruction: str = None, norm: bool = True) -> np.ndarray:
+@@ -48,7 +55,7 @@ class EmbeddingModelWrapper:
+         effective_batch = max(self.batch_size, 512)
+         for start in range(0, len(texts), effective_batch):
+             batch = texts[start : start + effective_batch]
+-            if instruction:
++            if instruction and self.supports_instruction:
+                 batch = [f"{instruction} {t}" for t in batch]
+             embs = self._run_async(self._embed_func(batch))
+             if not isinstance(embs, np.ndarray):
 diff --git a/src/passage_entity/graph_adapter.py b/src/passage_entity/graph_adapter.py
 index b8d98b3..530ff7c 100644
 --- a/src/passage_entity/graph_adapter.py
