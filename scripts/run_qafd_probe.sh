@@ -82,7 +82,30 @@ ST_DEVICE=${ST_DEVICE:-cpu}   # query encoder; cpu keeps the GPU entirely for vL
 #
 # Any null about edge weighting is conditional on these. Defaults reproduce every
 # run so far; the paper's regime is ALPHA=50 MAXITER=20000 BATCH_PUSH=1.
-ALPHA=${ALPHA:-1.5}
+# PROFILE=paper uses the config QAFD's own entry point ships for multihop --
+# benchmarks/run.py GRAPH_TYPE_DEFAULTS["passage-entity"], commented there as
+# "from proven successful runs". It differs from benchmark_runner.py's argparse
+# defaults in three places, and calling benchmark_runner directly (as this
+# runbook did) silently gets the argparse ones:
+#
+#                    benchmarks/run.py     argparse default
+#   weight_scheme    original (Eq. 5c)     multiply (Eq. 5b)
+#   linking_top_k    5                     10
+#   alpha            2.0                   1.5
+#
+# weight_scheme is the one that matters here: every edge-weight result so far was
+# measured against Product, not the Hybrid form they ship. linking_top_k feeds
+# seeding, so it is upstream of the fact-score arms too.
+PROFILE=${PROFILE:-}
+if [ "$PROFILE" = paper ]; then
+    ALPHA=${ALPHA:-2.0}
+    WEIGHT_SCHEME=${WEIGHT_SCHEME:-original}
+    LINKING_TOP_K=${LINKING_TOP_K:-5}
+else
+    ALPHA=${ALPHA:-1.5}
+    WEIGHT_SCHEME=${WEIGHT_SCHEME:-multiply}
+    LINKING_TOP_K=${LINKING_TOP_K:-10}
+fi
 MAXITER=${MAXITER:-500}
 BATCH_PUSH=${BATCH_PUSH:-}
 
@@ -216,6 +239,10 @@ $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 SUFFIX=""
 [ "$(printf '%g' "$ALPHA")" != "1.5" ] && SUFFIX="${SUFFIX}-a$(printf '%g' "$ALPHA")"
 [ -n "$BATCH_PUSH" ] && SUFFIX="${SUFFIX}-bp"
+# Non-destructive: runs at the shipped config get their own names rather than
+# overwriting the dumps behind the existing RESULTS.md table.
+[ "$WEIGHT_SCHEME" != multiply ] && SUFFIX="${SUFFIX}-ws${WEIGHT_SCHEME}"
+[ "$LINKING_TOP_K" != 10 ] && SUFFIX="${SUFFIX}-ltk${LINKING_TOP_K}"
 
 # One shard of one arm.
 # benchmark_runner composes the dump name itself, starting from "vanilla" and
@@ -247,6 +274,8 @@ run_shard () {
         --embedding_model "$EMB" \
         --retrieval_top_k "$TOPK" \
         --qafd_alpha "$ALPHA" \
+        --qafd_weight_scheme "$WEIGHT_SCHEME" \
+        --linking_top_k "$LINKING_TOP_K" \
         --qafd_max_iterations "$MAXITER" \
         ${BATCH_PUSH:+--batch_push} \
         --skip_qa \
@@ -331,7 +360,7 @@ if [ -n "${MERGE_ONLY:-}" ]; then
     exit 0
 fi
 
-echo "==> arms (JOBS=$JOBS, embeddings on $ST_DEVICE, alpha=$ALPHA maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
+echo "==> arms (JOBS=$JOBS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
