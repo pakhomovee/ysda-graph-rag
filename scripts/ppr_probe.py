@@ -249,6 +249,14 @@ def main():
     ap.add_argument("--oracle_site", default="edges", choices=["edges", "seeds"],
                     help="edges: scale gold-incident edge weights. "
                          "seeds: scale the gold entries of the reset vector instead")
+    # The control that decides whether a ceiling is content or structure. Same
+    # number of entities, same boost, same everything -- attached to ANOTHER
+    # question's gold passages. If the gain survives, the arm was rewarding
+    # concentration of mass rather than knowing which nodes matter, and its
+    # ceiling is not a ceiling for any scorer. RESULTS.md calls this the single
+    # strongest piece of evidence in the repo, for exactly this reason.
+    ap.add_argument("--oracle_shuffle", action="store_true",
+                    help="take the gold entities from the NEXT question instead")
     ap.add_argument("--seed_top_k", type=int, default=5, help="entity seeds kept per query")
     ap.add_argument("--passage_node_weight", type=float, default=0.05)
     ap.add_argument("--topk", type=int, default=200)
@@ -345,10 +353,15 @@ def main():
                 _scope = {"entities": "ent", "entities-open": "entopen"}.get(args.oracle_nodes, "")
                 if args.oracle_site == "seeds":
                     _scope += "seed"
+                if args.oracle_shuffle:
+                    _scope += "shuf"
             tag = f"{arm}{_scope}-d{damping:g}"
             t0 = time.time()
             dump, cvs = {}, []
-            for q in queries:
+            for _qi, q in enumerate(queries):
+                # Permuted by one position: a derangement over the question list,
+                # so no question ever draws its own entities.
+                _src = queries[(_qi + 1) % len(queries)] if args.oracle_shuffle else q
                 qv = Q[qmap[q.question]]
                 s_ent = E_ent @ qv
                 s_pas = E_pas @ qv
@@ -371,7 +384,7 @@ def main():
                                  args.hybrid_a, args.hybrid_b, beta)
                 if mult != 1.0:
                     gold_v, eligible = set(), None
-                    for pid in q.gold_pids:
+                    for pid in _src.gold_pids:
                         v = pid_to_vertex.get(int(pid))
                         if v is None:
                             continue
