@@ -86,20 +86,28 @@ def edge_weights(w_base, s_u, s_v, scheme, hybrid_a=1.0, hybrid_b=0.25, beta=8.0
     raise ValueError(f"unknown scheme: {scheme}")
 
 
-def apply_oracle(w, eu, ev, gold_vertices, mult):
-    """Multiply every edge incident to a gold vertex.
+def apply_oracle(w, eu, ev, gold_vertices, mult, eligible=None):
+    """Multiply every eligible edge incident to a gold vertex.
 
-    This LEAKS, and the leak is the point of the ceiling: gold passages are also
-    the ranking targets, so part of any gain is mass landing directly on the
-    scored node rather than being steered toward it. Read it as an upper bound
-    on an upper bound; --oracle_nodes entities drops the passage node to
-    separate steering from leak.
+    The PASSAGE form leaks, badly, and worse here than in a push loop: a node's
+    stationary probability under PPR is essentially the weighted flow into it, so
+    scaling every edge touching a gold passage lifts that passage's own score
+    almost mechanically. It ranks nodes you marked rather than steering traversal
+    toward them, which is why it saturates.
+
+    `eligible` is what makes the ENTITY form mean something: restricted to edges
+    that touch no passage node at all, the oracle can only raise the probability
+    of REACHING the gold neighbourhood, and ordinary entity->passage edges then
+    have to carry mass to the target at their unmodified weight. That is steering
+    with the leak removed, and it is the arm the decision actually rests on.
     """
     if mult == 1.0 or len(gold_vertices) == 0:
         return w
     gold = np.zeros(int(max(eu.max(), ev.max())) + 1, dtype=bool)
     gold[np.fromiter(gold_vertices, dtype=np.int64)] = True
     hit = gold[eu] | gold[ev]
+    if eligible is not None:
+        hit &= eligible
     out = w.copy()
     out[hit] *= mult
     return out
@@ -186,6 +194,14 @@ def selftest():
     # PPR divides the level out, so a diagnostic that moved with it would report
     # steering where there is none.
     assert abs(routing_cv(w_base * 1000, eu, ev, n) - routing_cv(w_base, eu, ev, n)) < 1e-9
+    # The eligibility mask must confine the boost, or the entity arm silently
+    # becomes the passage arm and measures the leak it exists to remove.
+    elig = (eu != 0) & (ev != 0)
+    gated = apply_oracle(w_base, eu, ev, {3, 7}, 100.0, elig)
+    assert np.array_equal(gated[~elig], w_base[~elig]), "ineligible edges must be untouched"
+    both = ((eu == 3) | (ev == 3) | (eu == 7) | (ev == 7)) & elig
+    assert np.allclose(gated[both], w_base[both] * 100)
+
     # An oracle that fires must raise dispersion, or the arm cannot steer at all.
     assert routing_cv(apply_oracle(w_base, eu, ev, {3, 7}, 100.0), eu, ev, n) > \
         routing_cv(w_base, eu, ev, n)
@@ -208,11 +224,14 @@ def main():
                     help="0.5 is what both shipped implementations use (~2-hop walk)")
     ap.add_argument("--hybrid_a", type=float, default=1.0)
     ap.add_argument("--hybrid_b", type=float, default=0.25)
-    # Only the passage oracle is implemented here. The entity-only variant --
-    # which drops the gold passage node and keeps its extracted entities, and is
-    # what separates steering from the leak -- needs the OpenIE entity->chunk map
-    # this script does not load. It is the follow-up if the site responds at all.
-    ap.add_argument("--oracle_nodes", default="passages", choices=["passages"])
+    # passages: boost edges incident to the gold passage node. Leaks -- the node
+    #           is also the ranking target. Saturates, and bounds nothing useful.
+    # entities: boost edges among the gold passage's own entities, excluding every
+    #           edge that touches ANY passage node. Mass still has to travel to the
+    #           target over unmodified entity->passage edges, so this measures
+    #           steering. The gold entities are read off the graph (entity
+    #           neighbours of the gold passage), not from an OpenIE sidecar.
+    ap.add_argument("--oracle_nodes", default="passages", choices=["passages", "entities"])
     ap.add_argument("--seed_top_k", type=int, default=5, help="entity seeds kept per query")
     ap.add_argument("--passage_node_weight", type=float, default=0.05)
     ap.add_argument("--topk", type=int, default=200)
@@ -287,12 +306,23 @@ def main():
                          f"e.g. {missing[0].question[:60]!r}")
 
     pid_to_vertex = {int(p): int(v) for p, v in zip(pas_pid, pas_idx) if p >= 0}
+    is_passage = np.zeros(n, dtype=bool)
+    is_passage[pas_idx] = True
+    is_entity = np.zeros(n, dtype=bool)
+    is_entity[ent_idx] = True
+    # Edges touching no passage node. The entity oracle is confined to these so it
+    # cannot pump mass straight into a ranking target; see apply_oracle.
+    entity_only_edges = ~(is_passage[eu] | is_passage[ev])
+    if args.oracle_nodes == "entities":
+        print(f"    entity-only oracle: {int(entity_only_edges.sum())} of {len(eu)} "
+              f"edges are eligible (touch no passage node)")
     os.makedirs(args.out_dir, exist_ok=True)
 
     for damping in args.damping:
         for arm in args.arms:
             scheme, mult, beta = arm_spec(arm)
-            tag = f"{arm}-d{damping:g}"
+            _scope = "ent" if (args.oracle_nodes == "entities" and mult != 1.0) else ""
+            tag = f"{arm}{_scope}-d{damping:g}"
             t0 = time.time()
             dump, cvs = {}, []
             for q in queries:
@@ -317,11 +347,21 @@ def main():
                 w = edge_weights(w_base, node_sim[eu], node_sim[ev], scheme,
                                  args.hybrid_a, args.hybrid_b, beta)
                 if mult != 1.0:
-                    gold_v = set()
+                    gold_v, eligible = set(), None
                     for pid in q.gold_pids:
-                        if pid in pid_to_vertex:
-                            gold_v.add(pid_to_vertex[pid])
-                    w = apply_oracle(w, eu, ev, gold_v, mult)
+                        v = pid_to_vertex.get(int(pid))
+                        if v is None:
+                            continue
+                        if args.oracle_nodes == "passages":
+                            gold_v.add(v)
+                        else:
+                            # The gold passage's own entities, straight off the
+                            # graph: passage->entity edges are how the extraction
+                            # is recorded, so no OpenIE sidecar is needed.
+                            gold_v.update(nb for nb in graph.neighbors(v) if is_entity[nb])
+                    if args.oracle_nodes == "entities":
+                        eligible = entity_only_edges
+                    w = apply_oracle(w, eu, ev, gold_v, mult, eligible)
                 # prpack rejects non-positive weights; keep the graph connected
                 w = np.maximum(w, 1e-12)
 
