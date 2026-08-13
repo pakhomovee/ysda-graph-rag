@@ -96,16 +96,34 @@ ST_DEVICE=${ST_DEVICE:-cpu}   # query encoder; cpu keeps the GPU entirely for vL
 # weight_scheme is the one that matters here: every edge-weight result so far was
 # measured against Product, not the Hybrid form they ship. linking_top_k feeds
 # seeding, so it is upstream of the fact-score arms too.
+# PROFILE=bundle is the config the AUTHORS' OWN run used, read out of the
+# results_<ds>.json their HuggingFace KG ships (their benchmark_runner writes it
+# into working_dir, recording config.* as the run actually used them):
+#
+#   qafd_alpha 3.0   qafd_epsilon 0.005   qafd_weight_scheme "none"
+#   linking_top_k 5  retrieval_top_k 200  qafd_max_iterations 500
+#
+# Three of those differ from what any entry point in the repo defaults to, and
+# weight_scheme "none" means that run had the query-aware edge weighting -- the
+# paper's contribution -- switched off. Reproducing their setting is therefore a
+# different thing from reproducing benchmarks/run.py, and both differ from the
+# paper text (alpha 50). Keep all three reachable by name rather than by memory.
 PROFILE=${PROFILE:-}
 if [ "$PROFILE" = paper ]; then
     ALPHA=${ALPHA:-2.0}
     WEIGHT_SCHEME=${WEIGHT_SCHEME:-original}
+    LINKING_TOP_K=${LINKING_TOP_K:-5}
+elif [ "$PROFILE" = bundle ]; then
+    ALPHA=${ALPHA:-3.0}
+    EPSILON=${EPSILON:-0.005}
+    WEIGHT_SCHEME=${WEIGHT_SCHEME:-none}
     LINKING_TOP_K=${LINKING_TOP_K:-5}
 else
     ALPHA=${ALPHA:-1.5}
     WEIGHT_SCHEME=${WEIGHT_SCHEME:-multiply}
     LINKING_TOP_K=${LINKING_TOP_K:-10}
 fi
+EPSILON=${EPSILON:-0.01}          # benchmark_runner's argparse default
 MAXITER=${MAXITER:-500}
 BATCH_PUSH=${BATCH_PUSH:-}
 
@@ -263,6 +281,7 @@ $PY_MBUZAI "$ROOT/scripts/make_qafd_oracle.py" $OURS
 # 50.0 do not produce two different names for one regime.
 SUFFIX=""
 [ "$(printf '%g' "$ALPHA")" != "1.5" ] && SUFFIX="${SUFFIX}-a$(printf '%g' "$ALPHA")"
+[ "$(printf '%g' "$EPSILON")" != "0.01" ] && SUFFIX="${SUFFIX}-e$(printf '%g' "$EPSILON")"
 [ -n "$BATCH_PUSH" ] && SUFFIX="${SUFFIX}-bp"
 # Non-destructive: runs at the shipped config get their own names rather than
 # overwriting the dumps behind the existing RESULTS.md table.
@@ -315,6 +334,7 @@ run_shard () {
         --retrieval_top_k "$TOPK" \
         ${QUERY_EMB:+--query_emb_file "$QUERY_EMB"} \
         --qafd_alpha "$ALPHA" \
+        --qafd_epsilon "$EPSILON" \
         --qafd_weight_scheme "$WEIGHT_SCHEME" \
         --linking_top_k "$LINKING_TOP_K" \
         --qafd_max_iterations "$MAXITER" \
@@ -425,7 +445,7 @@ if [ -n "${MERGE_ONLY:-}" ]; then
     exit 0
 fi
 
-echo "==> arms ($_WORKERS workers x $_THREADS threads of $_CORES cores, JOBS=$JOBS SHARDS=$SHARDS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
+echo "==> arms ($_WORKERS workers x $_THREADS threads of $_CORES cores, JOBS=$JOBS SHARDS=$SHARDS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA eps=$EPSILON scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
