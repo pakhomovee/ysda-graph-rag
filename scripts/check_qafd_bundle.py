@@ -49,12 +49,25 @@ def main():
     if not os.path.isdir(kg):
         sys.exit(f"no such directory: {kg}")
 
+    # Walk rather than probe fixed names: a bundle can nest the stores, name them
+    # differently, or arrive half-downloaded, and each of those has to report as
+    # itself instead of as an empty section.
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(kg):
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            found.append((os.path.relpath(full, kg), full, os.path.getsize(full)))
+
     print(f"==> bundle {kg}")
-    for f in ("graph.pickle", "vdb_chunk.parquet", "vdb_entity.parquet", "vdb_fact.parquet"):
-        p = os.path.join(kg, f)
-        print(f"    {'ok ' if os.path.exists(p) else 'MISSING'} {f}"
-              + (f"  ({os.path.getsize(p) / 1e6:.1f} MB)" if os.path.exists(p) else ""))
-    if not os.path.exists(os.path.join(kg, "graph.pickle")):
+    for rel, _full, size in found:
+        print(f"    {rel:<40} {size / 1e6:>9.1f} MB")
+    if not found:
+        sys.exit("\nFATAL: directory is empty — the download did not land here.")
+
+    parquets = {rel: full for rel, full, _s in found if rel.endswith(".parquet")}
+    graph_pickle = next((full for rel, full, _s in found
+                         if os.path.basename(rel) == "graph.pickle"), None)
+    if graph_pickle is None:
         # working_dir only accepts a bundle directory that has this file; without
         # it the config silently falls back to outputs/ and the run quietly uses
         # a different KG than the one under test.
@@ -64,18 +77,32 @@ def main():
     import pandas as pd
 
     print("\n==> stores")
+    if not parquets:
+        sys.exit("FATAL: no .parquet anywhere under the bundle. The vector stores are\n"
+                 "  what makes it a prebuilt KG — with only graph.pickle, retrieval has\n"
+                 "  no embeddings to score against. Re-run the download.")
     dims = {}
-    counts = {}
-    for ns in ("chunk", "entity", "fact"):
-        p = os.path.join(kg, f"vdb_{ns}.parquet")
-        if not os.path.exists(p):
-            continue
-        df = pd.read_parquet(p)
-        counts[ns] = len(df)
-        dims[ns] = len(df["embedding"].iloc[0]) if len(df) else 0
-        print(f"    {ns:<7} {len(df):>7} rows, dim {dims[ns]}")
+    their_chunks = None
+    for rel, path in sorted(parquets.items()):
+        df = pd.read_parquet(path)
+        # Classify by filename: embedding_store names them vdb_<namespace>.parquet,
+        # but a bundle only has to be readable, not identically named.
+        ns = next((n for n in ("chunk", "entity", "fact") if n in os.path.basename(rel)),
+                  os.path.basename(rel))
+        cols = list(df.columns)
+        emb_col = "embedding" if "embedding" in cols else None
+        dim = len(df[emb_col].iloc[0]) if emb_col and len(df) else 0
+        dims[ns] = dim
+        print(f"    {rel:<40} {len(df):>7} rows, dim {dim}   cols={cols}")
         if ns == "chunk":
+            if "content" not in cols:
+                sys.exit(f"FATAL: {rel} has no 'content' column ({cols}).\n"
+                         "  embedding_store.py reads chunk text from it; without that the\n"
+                         "  bundle cannot be matched against our corpus at all.")
             their_chunks = df["content"].tolist()
+    if their_chunks is None:
+        sys.exit(f"FATAL: none of {sorted(parquets)} looks like the chunk store.\n"
+                 "  Pass the right directory, or say which file holds the passages.")
     # The encoder is not recorded in the bundle; the dimension is the only
     # evidence of it, and EMB has to match or the query vectors live in a
     # different space than the index.
@@ -88,7 +115,7 @@ def main():
     print("\n==> graph")
     try:
         import pickle
-        with open(os.path.join(kg, "graph.pickle"), "rb") as f:
+        with open(graph_pickle, "rb") as f:
             g = pickle.load(f)
         print(f"    {g.vcount()} nodes, {g.ecount()} edges")
     except Exception as exc:                      # igraph missing, or a pickle
