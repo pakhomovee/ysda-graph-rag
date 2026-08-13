@@ -44,7 +44,8 @@ if sys.version_info < (3, 10):
     sys.exit(f"needs the mbuzai env (3.10+), got {sys.version.split()[0]}")
 
 from mbuzai import dataio, metrics  # noqa: E402
-from mbuzai.edgemodel import EdgeScorer, build_features  # noqa: E402
+from mbuzai.edgemodel import (EdgeScorer, build_features,  # noqa: E402
+                             query_feature_mask)
 
 OUT = ROOT / "out"
 EMB_MODEL = "sentence-transformers/all-mpnet-base-v2"
@@ -86,9 +87,8 @@ def bfs_levels(indptr, indices, start, n_nodes, max_dist):
 _G = {}
 
 
-def _label_question(qi):
-    """Edges on a shortest path between this question's gold passages, plus
-    negatives. Returns (edge_ids, labels, n_positive) or None.
+def _positives(qi):
+    """Edge ids on a shortest path between this question's gold passages.
 
     Fully vectorised over the edge array. The obvious loop -- iterate the edges,
     test the path condition, look the id up in a dict -- runs 850k times per gold
@@ -113,28 +113,13 @@ def _label_question(qi):
             bu, bv = db[u_all], db[v_all]
             pos |= (du >= 0) & (bv >= 0) & (du + 1 + bv == da[t])
             pos |= (dv >= 0) & (bu >= 0) & (dv + 1 + bu == da[t])
-    pos_ids = np.flatnonzero(pos)
-    if pos_ids.size == 0:
+    ids = np.flatnonzero(pos)
+    if ids.size == 0:
         return None
-
-    rng = np.random.default_rng(_G["seed"] * 1000003 + qi)
-    n_pos_all = pos_ids.size
-    if pos_ids.size > _G["max_pos"]:
-        pos_ids = rng.choice(pos_ids, _G["max_pos"], replace=False)
-
-    # hard negatives: incident to a gold-path node but not themselves on a path
-    touched = np.unique(edges[pos_ids].ravel())
-    inc = np.flatnonzero((np.isin(u_all, touched) | np.isin(v_all, touched)) & ~pos)
-    n_hard = min(len(inc), _G["neg_per_pos"] * len(pos_ids) // 2)
-    hard = rng.choice(inc, n_hard, replace=False) if n_hard else np.empty(0, np.int64)
-    n_rand = _G["neg_per_pos"] * len(pos_ids) - n_hard
-    rand = rng.choice(len(edges), max(n_rand, 0), replace=False)
-    rand = rand[~pos[rand]]
-
-    sel = np.concatenate([pos_ids, hard, rand]).astype(np.int64)
-    lab = np.concatenate([np.ones(len(pos_ids)),
-                          np.zeros(len(hard) + len(rand))])
-    return sel, lab, n_pos_all
+    if ids.size > _G["max_pos"]:
+        ids = np.random.default_rng(_G["seed"] * 1000003 + qi).choice(
+            ids, _G["max_pos"], replace=False)
+    return ids
 
 
 def main():
@@ -215,25 +200,46 @@ def main():
     if args.jobs > 1:
         import concurrent.futures as cf, multiprocessing as mp
         with cf.ProcessPoolExecutor(args.jobs, mp_context=mp.get_context("fork")) as ex:
-            labelled = list(ex.map(_label_question, range(len(qs)), chunksize=8))
+            pos_by_q = list(ex.map(_positives, range(len(qs)), chunksize=8))
     else:
-        labelled = [_label_question(i) for i in range(len(qs))]
+        pos_by_q = [_positives(i) for i in range(len(qs))]
+    keep = [i for i, v in enumerate(pos_by_q) if v is not None]
+    print(f"positives: {sum(len(pos_by_q[i]) for i in keep)} on-path edges over "
+          f"{len(keep)} questions ({len(qs) - len(keep)} had no connected gold pair) "
+          f"in {time.time()-t0:.0f}s")
 
-    rows_e, rows_q, rows_y, on_path_total, skipped = [], [], [], 0, 0
-    for qi, out in enumerate(labelled):
-        if out is None:
-            skipped += 1
-            continue
-        sel, lab, n_pos = out
-        on_path_total += n_pos
-        rows_e.append(sel); rows_q.append(np.full(len(sel), qi)); rows_y.append(lab)
+    # Negatives are on-path edges of OTHER questions. Random edges do not work:
+    # "is this edge on a short path between two passages" is largely answerable
+    # from the edge alone -- h_u*h_v, |h_u-h_v|, the degrees and w_struct are all
+    # query-independent, and a random draw from 850k edges looks nothing like a
+    # path edge. The first version used half random negatives and the shuffle
+    # control came back at 0.7784 where chance is 0.50. Drawing negatives from the
+    # same pool makes both classes structurally identical, so only the query can
+    # separate them. Sampling the flat (question, edge) multiset rather than the
+    # distinct edges keeps the frequency profile matched too.
+    flat = np.concatenate([pos_by_q[i] for i in keep])
+    rows_e, rows_q, rows_y = [], [], []
+    for qi in keep:
+        pos = pos_by_q[qi]
+        own = np.zeros(len(edges), dtype=bool)
+        own[pos] = True
+        need, got = args.neg_per_pos * len(pos), []
+        for _ in range(8):
+            draw = rng.choice(flat, size=int(need * 1.4) + 8, replace=True)
+            draw = draw[~own[draw]]
+            got.append(draw[:need - sum(len(g) for g in got)])
+            if sum(len(g) for g in got) >= need:
+                break
+        neg = np.concatenate(got) if got else np.empty(0, np.int64)
+        sel = np.concatenate([pos, neg]).astype(np.int64)
+        rows_e.append(sel)
+        rows_q.append(np.full(len(sel), qi))
+        rows_y.append(np.concatenate([np.ones(len(pos)), np.zeros(len(neg))]))
 
     E = np.concatenate(rows_e); QI = np.concatenate(rows_q)
     Y = np.concatenate(rows_y).astype(np.float32)
-    kept = len(qs) - skipped
-    print(f"labels: {len(Y)} edges over {kept} questions ({int(Y.sum())} positive, "
-          f"{on_path_total / max(kept, 1):.1f} on-path edges per question; "
-          f"{skipped} questions had no connected gold pair) in {time.time()-t0:.0f}s")
+    print(f"labels: {len(Y)} edges ({int(Y.sum())} positive), negatives drawn "
+          f"from other questions' on-path edges")
 
     order = rng.permutation(len(qs))
     tr_q = set(order[:args.train_questions].tolist())
@@ -249,29 +255,56 @@ def main():
     Xtr, ytr = feats(tr), Y[tr]
     Xte, yte = feats(~tr), Y[~tr]
 
-    net = EdgeScorer(d, hidden=args.hidden, seed=args.seed)
-    state, best = {}, (-np.inf, None)
-    for ep in range(1, args.epochs + 1):
-        idx = rng.permutation(len(Xtr))
-        for i in range(0, len(idx), args.batch):
-            net.step(Xtr[idx[i:i + args.batch]], ytr[idx[i:i + args.batch]], state, args.lr)
-        if ep % 10 == 0 or ep == args.epochs:
-            auc = roc_auc(net.score(Xte), yte)
-            if auc > best[0]:
-                best = (auc, [p.copy() for p in net.params()])
-            print(f"  epoch {ep:3d}  held-out AUC {auc:.4f}")
-    for p, b in zip(net.params(), best[1]):
-        p[...] = b
+    # Two models on identical rows: the full one, and one with every
+    # query-dependent column zeroed. The second is a structural floor -- whatever
+    # it reaches is a property of the edge alone. A full model that merely
+    # matches it is not a w(u,v,q) at all, whatever the shuffle control says.
+    qmask = query_feature_mask(d)
+    results = {}
+    for tag in ("structure-only", "full"):
+        Xa, Xb = Xtr, Xte
+        if tag == "structure-only":
+            Xa, Xb = Xtr.copy(), Xte.copy()
+            Xa[:, qmask] = 0.0
+            Xb[:, qmask] = 0.0
+        net = EdgeScorer(d, hidden=args.hidden, seed=args.seed)
+        state, best = {}, (-np.inf, None)
+        for ep in range(1, args.epochs + 1):
+            idx = rng.permutation(len(Xa))
+            for i in range(0, len(idx), args.batch):
+                net.step(Xa[idx[i:i + args.batch]], ytr[idx[i:i + args.batch]],
+                         state, args.lr)
+            if ep % 25 == 0 or ep == args.epochs:
+                auc = roc_auc(net.score(Xb), yte)
+                if auc > best[0]:
+                    best = (auc, [p.copy() for p in net.params()])
+                print(f"  {tag:<15} epoch {ep:3d}  held-out AUC {auc:.4f}")
+        for prm, b in zip(net.params(), best[1]):
+            prm[...] = b
+        results[tag] = (best[0], net)
+        if tag == "structure-only":
+            del Xa, Xb
+
+    floor, _ = results["structure-only"]
+    auc, net = results["full"]
+    print(f"\nstructure-only (no query at all) : {floor:.4f}")
+    print(f"full w(u,v,q)                    : {auc:.4f}")
+    print(f"query-dependent contribution     : {auc - floor:+.4f}")
+    if auc - floor < 0.02:
+        print("\n*** The query buys nothing. The model is scoring edges on their own\n"
+              "    properties, so the in-pipeline arm would be a query-independent\n"
+              "    reweighting, not a w(u,v,q).")
 
     dest = args.out or OUT / (f"edge_scorer_{args.dataset}"
                               + ("_shuffled" if args.shuffle_control else "") + ".npz")
-    net.save(dest, held_out_auc=np.float32(best[0]))
-    print(f"\nheld-out AUC {best[0]:.4f}   wrote {dest}")
+    net.save(dest, held_out_auc=np.float32(auc), structure_only_auc=np.float32(floor))
+    print(f"wrote {dest}")
     print("""
-An AUC near 0.5 means the model cannot tell path edges from their neighbours, and
-the in-pipeline arm will be a null by construction. Well above 0.5 means it has
-learned something; whether that converts to retrieval is what the arm measures.
-Run --shuffle-control: it must collapse to ~0.5.""")
+Two things have to hold before the in-pipeline arm means anything:
+  --shuffle-control must collapse the full model to ~0.5
+  full must beat structure-only by a clear margin
+Otherwise the model is reweighting edges on their own properties, which is a
+w(u,v) and answers a different question than the one being asked.""")
 
 
 def roc_auc(scores, labels):

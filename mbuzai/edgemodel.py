@@ -30,6 +30,20 @@ def n_features(d: int) -> int:
     return 4 * d + FEAT_EXTRA
 
 
+def query_feature_mask(d: int):
+    """True for the columns that depend on the query.
+
+    Zeroing these gives a structure-only model: whatever it still scores is a
+    query-independent property of the edge. That is the floor any w(u,v,q) has to
+    beat to be doing what it claims.
+    """
+    m = np.zeros(n_features(d), dtype=bool)
+    m[0:2 * d] = True                  # h_u*h_q, h_v*h_q
+    m[4 * d + 0] = True                # cos(u,q)
+    m[4 * d + 1] = True                # cos(v,q)
+    return m
+
+
 def build_features(hu, hv, hq, deg_u, deg_v, w_struct):
     """(m, 4d+6) float32. All embeddings must already be L2-normalised."""
     hu = np.asarray(hu, dtype=np.float32)
