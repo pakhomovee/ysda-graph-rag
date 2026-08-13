@@ -276,8 +276,8 @@ dump_stem () {
         subqedges) echo "edges-generated${SUFFIX}" ;;
         subqseeds) echo "seeds-generated${SUFFIX}" ;;
         dpr)       echo "vanilla-dpr${SUFFIX}" ;;
-        edgemodel*) echo "vanilla-em${a#edgemodel}${SUFFIX}" ;;
-        em*)       echo "vanilla-em${a#em}${SUFFIX}" ;;
+        edgemodel*) echo "vanilla-em${name#edgemodel}${SUFFIX}" ;;
+        em*)       echo "vanilla-em${name#em}${SUFFIX}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
     esac
