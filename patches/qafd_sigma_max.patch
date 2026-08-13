@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..4fd2dfd 100644
+index 40ee5b0..8ba5e34 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -148,7 +148,7 @@ index 40ee5b0..4fd2dfd 100644
  
  async def _openai_embed(texts, model="text-embedding-3-small", api_key=""):
      client = _get_client(api_key=api_key)
-@@ -412,7 +453,10 @@ def main():
+@@ -412,7 +453,18 @@ def main():
      parser.add_argument("--qafd_alpha", type=float, default=1.5)
      parser.add_argument("--qafd_epsilon", type=float, default=0.01)
      parser.add_argument("--qafd_max_iterations", type=int, default=500)
@@ -157,10 +157,18 @@ index 40ee5b0..4fd2dfd 100644
 +                        choices=["original", "multiply", "add", "exp", "none"],
 +                        help="original=Hybrid Eq.5c, multiply=Product Eq.5b, add=Mean Eq.5a, "
 +                             "exp=w*exp(beta*(s_u+s_v)) (not in the paper; see --exp_beta)")
++    # Hybrid is w * (a + b * avg_query_sim). The paper fixes a = 1, b = 1/4;
++    # graph_adapter defaults b to 0.5 and nothing overrode it, so "original"
++    # has always run at twice the published spread -- in the mechanism's
++    # favour, but not what the paper specifies.
++    parser.add_argument("--hybrid_a", type=float, default=1.0,
++                        help="Eq. 2c/5c intercept a (paper: 1)")
++    parser.add_argument("--hybrid_b", type=float, default=0.5,
++                        help="Eq. 2c/5c slope b (paper: 0.25; code default 0.5)")
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,57 @@ def main():
+@@ -426,6 +478,57 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -218,7 +226,7 @@ index 40ee5b0..4fd2dfd 100644
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +554,18 @@ def main():
+@@ -459,6 +562,18 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -237,7 +245,16 @@ index 40ee5b0..4fd2dfd 100644
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -507,7 +614,19 @@ def main():
+@@ -475,6 +590,8 @@ def main():
+         qafd_epsilon=args.qafd_epsilon,
+         qafd_max_iterations=args.qafd_max_iterations,
+         qafd_weight_scheme=args.qafd_weight_scheme,
++        hybrid_a=args.hybrid_a,
++        hybrid_b=args.hybrid_b,
+         qafd_step_size=args.qafd_step_size,
+         sim_mode=args.sim_mode,
+         qa_sink_gamma=args.qa_sink_gamma,
+@@ -507,7 +624,19 @@ def main():
      # Embedding function (must match the model used to build the KG)
      # ----------------------------------------------------------------
      emb_key = config.embedding_model_key
@@ -258,7 +275,7 @@ index 40ee5b0..4fd2dfd 100644
          openai_model = "text-embedding-3-small" if emb_key == "openai-small" else "text-embedding-3-large"
          async def embed_func(texts):
              return await _openai_embed(texts, model=openai_model, api_key=_api_key)
-@@ -519,6 +638,8 @@ def main():
+@@ -519,6 +648,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -267,7 +284,7 @@ index 40ee5b0..4fd2dfd 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +650,9 @@ def main():
+@@ -529,6 +660,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -277,7 +294,7 @@ index 40ee5b0..4fd2dfd 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -536,7 +660,16 @@ def main():
+@@ -536,7 +670,16 @@ def main():
              raise ValueError(f"Unknown embedding model: {emb_key}")
          async def embed_func(texts):
              return np.array(_local_model.batch_encode(texts))
@@ -295,7 +312,7 @@ index 40ee5b0..4fd2dfd 100644
  
      # ----------------------------------------------------------------
      # Load data
-@@ -608,6 +741,23 @@ def main():
+@@ -608,6 +751,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -319,7 +336,7 @@ index 40ee5b0..4fd2dfd 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +776,19 @@ def main():
+@@ -626,6 +786,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -339,7 +356,7 @@ index 40ee5b0..4fd2dfd 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +810,288 @@ def main():
+@@ -647,11 +820,290 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -590,6 +607,8 @@ index 40ee5b0..4fd2dfd 100644
 +    # here are a different configuration and must not share a filename with it.
 +    if config.qafd_weight_scheme != "multiply":
 +        _arm += "-ws%s" % config.qafd_weight_scheme
++    if config.qafd_weight_scheme == "original" and config.hybrid_b != 0.5:
++        _arm += "-hb%g" % config.hybrid_b
 +    if config.linking_top_k != 10:
 +        _arm += "-ltk%d" % config.linking_top_k
 +    # A truncated run is a different experiment and must never land on the full
@@ -628,7 +647,7 @@ index 40ee5b0..4fd2dfd 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1152,9 @@ def main():
+@@ -712,7 +1164,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
@@ -640,10 +659,21 @@ index 40ee5b0..4fd2dfd 100644
          "graph_type": "passage-entity",
          "dataset": args.dataset,
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
-index d015a39..3c8f76f 100644
+index d015a39..7ba0f9c 100644
 --- a/src/passage_entity/config.py
 +++ b/src/passage_entity/config.py
-@@ -57,6 +57,23 @@ class PassageEntityConfig:
+@@ -52,11 +52,34 @@ class PassageEntityConfig:
+     qafd_epsilon: float = 0.01
+     qafd_max_iterations: int = 500
+     qafd_weight_scheme: str = "multiply"     # "multiply", "add", "original"
++    # Eq. 2c coefficients, w * (a + b * avg_query_sim). The paper specifies
++    # a = 1, b = 1/4; graph_adapter's signature default is b = 0.5, which the
++    # retriever never overrode -- so every "original" run so far used twice the
++    # published spread. Exposed so the paper's own form is reachable.
++    hybrid_a: float = 1.0
++    hybrid_b: float = 0.5
+     qafd_use_node_degree: bool = True
+     qafd_step_size: float = 0.2
      qafd_random_seed: int = 42
  
      # ── Query-aware enhancements (all default = original behaviour) ────────
@@ -1006,7 +1036,7 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..a54c318 100644
+index e2b2da2..76c9993 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
 @@ -83,6 +83,13 @@ class PassageEntityRetriever:
@@ -1183,7 +1213,16 @@ index e2b2da2..a54c318 100644
  
          # --- Run QAFD ---
          qafd_start = time.time()
-@@ -348,6 +459,12 @@ class PassageEntityRetriever:
+@@ -338,6 +449,8 @@ class PassageEntityRetriever:
+             max_iterations=self.config.qafd_max_iterations,
+             step_size=self.config.qafd_step_size,
+             weight_scheme=self.config.qafd_weight_scheme,
++            hybrid_a=getattr(self.config, 'hybrid_a', 1.0),
++            hybrid_b=getattr(self.config, 'hybrid_b', 0.5),
+             use_node_degree=self.config.qafd_use_node_degree,
+             random_seed=self.config.qafd_random_seed,
+             sim_mode=self.config.sim_mode,
+@@ -348,6 +461,12 @@ class PassageEntityRetriever:
              qa_accum_gamma=self.config.qa_accum_gamma,
              qa_post_lambda=self.config.qa_post_lambda,
              batch_push=self.config.batch_push,

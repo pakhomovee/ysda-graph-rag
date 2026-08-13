@@ -124,6 +124,11 @@ else
     LINKING_TOP_K=${LINKING_TOP_K:-10}
 fi
 EPSILON=${EPSILON:-0.01}          # benchmark_runner's argparse default
+# Eq. 2c is w * (a + b * avg_query_sim). The PAPER fixes a=1, b=1/4; the code
+# defaults b to 0.5 and never overrode it, so every "original" arm so far ran at
+# twice the published spread -- generous to the mechanism, but not the paper.
+HYBRID_A=${HYBRID_A:-1.0}
+HYBRID_B=${HYBRID_B:-0.5}
 MAXITER=${MAXITER:-500}
 BATCH_PUSH=${BATCH_PUSH:-}
 
@@ -286,6 +291,8 @@ SUFFIX=""
 # Non-destructive: runs at the shipped config get their own names rather than
 # overwriting the dumps behind the existing RESULTS.md table.
 [ "$WEIGHT_SCHEME" != multiply ] && SUFFIX="${SUFFIX}-ws${WEIGHT_SCHEME}"
+[ "$WEIGHT_SCHEME" = original ] && [ "$(printf '%g' "$HYBRID_B")" != "0.5" ] \
+    && SUFFIX="${SUFFIX}-hb$(printf '%g' "$HYBRID_B")"
 [ "$LINKING_TOP_K" != 10 ] && SUFFIX="${SUFFIX}-ltk${LINKING_TOP_K}"
 [ -n "${NUM_QUERIES:-}" ] && SUFFIX="${SUFFIX}-n${NUM_QUERIES}"
 
@@ -336,6 +343,7 @@ run_shard () {
         --qafd_alpha "$ALPHA" \
         --qafd_epsilon "$EPSILON" \
         --qafd_weight_scheme "$WEIGHT_SCHEME" \
+        --hybrid_a "$HYBRID_A" --hybrid_b "$HYBRID_B" \
         --linking_top_k "$LINKING_TOP_K" \
         --qafd_max_iterations "$MAXITER" \
         ${BATCH_PUSH:+--batch_push} \
@@ -445,7 +453,7 @@ if [ -n "${MERGE_ONLY:-}" ]; then
     exit 0
 fi
 
-echo "==> arms ($_WORKERS workers x $_THREADS threads of $_CORES cores, JOBS=$JOBS SHARDS=$SHARDS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA eps=$EPSILON scheme=$WEIGHT_SCHEME ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
+echo "==> arms ($_WORKERS workers x $_THREADS threads of $_CORES cores, JOBS=$JOBS SHARDS=$SHARDS, ${PROFILE:+profile=$PROFILE }alpha=$ALPHA eps=$EPSILON scheme=$WEIGHT_SCHEME b=$HYBRID_B ltk=$LINKING_TOP_K maxiter=$MAXITER batch_push=${BATCH_PUSH:-off})"
 PENDING=()
 for arm in $ARMS; do
     arm_flags "$arm" >/dev/null || exit 1     # validate every name before starting
