@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..3c41a7c 100644
+index 40ee5b0..41b7a2d 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -160,7 +160,7 @@ index 40ee5b0..3c41a7c 100644
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,48 @@ def main():
+@@ -426,6 +470,51 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -196,6 +196,9 @@ index 40ee5b0..3c41a7c 100644
 +                             "independent processes; merge the dumps afterwards")
 +    parser.add_argument("--edge_model_file", type=str, default=None,
 +                        help="trained edge scorer .npz from scripts/train_edge_scorer.py")
++    parser.add_argument("--edge_model_tag", type=str, default="em",
++                        help="arm-name tag for this model, so a control model "
++                             "trained on permuted labels gets its own dump")
 +    parser.add_argument("--edge_model_beta", type=float, default=4.0,
 +                        help="dynamic range of the learned weight: w * exp(beta*sigmoid)")
 +    parser.add_argument("--retrieval_mode", type=str, default="qafd",
@@ -209,7 +212,7 @@ index 40ee5b0..3c41a7c 100644
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +545,17 @@ def main():
+@@ -459,6 +548,18 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -222,12 +225,13 @@ index 40ee5b0..3c41a7c 100644
 +        retrieval_mode=args.retrieval_mode,
 +        edge_model_file=args.edge_model_file,
 +        edge_model_beta=args.edge_model_beta,
++        edge_model_tag=args.edge_model_tag,
 +        exp_beta=args.exp_beta,
 +        edge_stats_file=args.edge_stats_file,
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +616,8 @@ def main():
+@@ -519,6 +620,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -236,7 +240,7 @@ index 40ee5b0..3c41a7c 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +628,9 @@ def main():
+@@ -529,6 +632,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -246,7 +250,7 @@ index 40ee5b0..3c41a7c 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -536,7 +638,15 @@ def main():
+@@ -536,7 +642,15 @@ def main():
              raise ValueError(f"Unknown embedding model: {emb_key}")
          async def embed_func(texts):
              return np.array(_local_model.batch_encode(texts))
@@ -263,7 +267,7 @@ index 40ee5b0..3c41a7c 100644
  
      # ----------------------------------------------------------------
      # Load data
-@@ -608,6 +718,23 @@ def main():
+@@ -608,6 +722,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -287,7 +291,7 @@ index 40ee5b0..3c41a7c 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +753,19 @@ def main():
+@@ -626,6 +757,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -307,7 +311,7 @@ index 40ee5b0..3c41a7c 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +787,240 @@ def main():
+@@ -647,11 +791,240 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -516,7 +520,7 @@ index 40ee5b0..3c41a7c 100644
 +    # run's filename. Without this a --num_queries 100 smoke test silently
 +    # overwrote a completed 1000-question arm.
 +    if config.edge_model_file:
-+        _arm += "-em%g" % config.edge_model_beta
++        _arm += "-%s%g" % (config.edge_model_tag, config.edge_model_beta)
 +    if config.retrieval_mode != "qafd":
 +        _arm += "-%s" % config.retrieval_mode
 +    if args.num_queries > 0:
@@ -548,7 +552,7 @@ index 40ee5b0..3c41a7c 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1081,9 @@ def main():
+@@ -712,7 +1085,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
@@ -560,10 +564,10 @@ index 40ee5b0..3c41a7c 100644
          "graph_type": "passage-entity",
          "dataset": args.dataset,
 diff --git a/src/passage_entity/config.py b/src/passage_entity/config.py
-index d015a39..df790c6 100644
+index d015a39..3c8f76f 100644
 --- a/src/passage_entity/config.py
 +++ b/src/passage_entity/config.py
-@@ -57,6 +57,22 @@ class PassageEntityConfig:
+@@ -57,6 +57,23 @@ class PassageEntityConfig:
      qafd_random_seed: int = 42
  
      # ── Query-aware enhancements (all default = original behaviour) ────────
@@ -581,6 +585,7 @@ index d015a39..df790c6 100644
 +    exp_beta: float = 0.0                   # used only by qafd_weight_scheme="exp"
 +    edge_model_file: Optional[str] = None   # trained w(u,v,q) from train_edge_scorer.py
 +    edge_model_beta: float = 4.0            # w_struct * exp(beta * sigmoid(logit))
++    edge_model_tag: str = "em"              # arm-name tag; emshuf = permuted-label control
 +    edge_stats_file: Optional[str] = None   # routing-contrast instrumentation dump
 +
      sim_mode: str = "normalized"     # Similarity contrast: "normalized", "relu", "relu_sq"

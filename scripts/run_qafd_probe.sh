@@ -140,6 +140,9 @@ SUB="$ROOT/third_party/QAFD-RAG"
 ORACLE="$ROOT/out/qafd_oracle_${OURS}.json"
 SUBQ=${SUBQ:-$ROOT/out/subq_${OURS}_generated_bytext.json}
 EDGE_MODEL=${EDGE_MODEL:-$ROOT/out/edge_scorer_${OURS}.npz}
+# The same model trained on permuted gold sets. Running it in the pipeline
+# separates "the learned signal helps" from "perturbing the weights helps".
+EDGE_MODEL_SHUF=${EDGE_MODEL_SHUF:-$ROOT/out/edge_scorer_${OURS}_shuffled.npz}
 
 echo "==> preflight"
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
@@ -280,6 +283,7 @@ dump_stem () {
         # the oracle / exp / sink arms use.
         dpr)       echo "vanilla${SUFFIX}-dpr" ;;
         edgemodel*) echo "vanilla${SUFFIX}-em${name#edgemodel}" ;;
+        emshuf*)   echo "vanilla${SUFFIX}-emshuf${name#emshuf}" ;;
         em*)       echo "vanilla${SUFFIX}-em${name#em}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
@@ -380,6 +384,8 @@ arm_flags () {   # arm name -> benchmark_runner flags
               # "edgemode1" often enough to be worth an alias.
         edgemodel*) printf '%s\n' --edge_model_file "$EDGE_MODEL" \
                         --edge_model_beta "${a#edgemodel}" ;;
+        emshuf*)   printf '%s\n' --edge_model_file "$EDGE_MODEL_SHUF" \
+                        --edge_model_beta "${a#emshuf}" --edge_model_tag emshuf ;;
         em*)       printf '%s\n' --edge_model_file "$EDGE_MODEL" \
                         --edge_model_beta "${a#em}" ;;
         # oracle<mult>[ent][seed] — ent drops the gold PASSAGE node (which is also a
