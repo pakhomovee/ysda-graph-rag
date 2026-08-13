@@ -143,6 +143,10 @@ EDGE_MODEL=${EDGE_MODEL:-$ROOT/out/edge_scorer_${OURS}.npz}
 # The same model trained on permuted gold sets. Running it in the pipeline
 # separates "the learned signal helps" from "perturbing the weights helps".
 EDGE_MODEL_SHUF=${EDGE_MODEL_SHUF:-$ROOT/out/edge_scorer_${OURS}_shuffled.npz}
+# Cached query vectors. With the authors' prebuilt KG the encoder is NV-Embed-v2
+# (7B), and every shard worker would otherwise load its own copy. Encode once:
+#   python src/passage_entity/benchmark_runner.py ... --cache_query_emb <path>
+QUERY_EMB=${QUERY_EMB:-}
 
 echo "==> preflight"
 [ -d "$SUB/src" ] || { echo "submodule missing — run: bash scripts/setup_qafd.sh" >&2; exit 1; }
@@ -309,6 +313,7 @@ run_shard () {
         --llm_api_key "$LLM_API_KEY" \
         --embedding_model "$EMB" \
         --retrieval_top_k "$TOPK" \
+        ${QUERY_EMB:+--query_emb_file "$QUERY_EMB"} \
         --qafd_alpha "$ALPHA" \
         --qafd_weight_scheme "$WEIGHT_SCHEME" \
         --linking_top_k "$LINKING_TOP_K" \

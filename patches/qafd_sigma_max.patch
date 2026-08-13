@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..41b7a2d 100644
+index 40ee5b0..0dde3a9 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -160,7 +160,7 @@ index 40ee5b0..41b7a2d 100644
      parser.add_argument("--qafd_step_size", type=float, default=0.2)
  
      # Retrieval
-@@ -426,6 +470,51 @@ def main():
+@@ -426,6 +470,57 @@ def main():
                          help="Only run retrieval, skip QA step")
  
      # Query-aware enhancements (all default = original behaviour)
@@ -196,6 +196,12 @@ index 40ee5b0..41b7a2d 100644
 +                             "independent processes; merge the dumps afterwards")
 +    parser.add_argument("--edge_model_file", type=str, default=None,
 +                        help="trained edge scorer .npz from scripts/train_edge_scorer.py")
++    parser.add_argument("--cache_query_emb", type=str, default=None,
++                        help="encode every question with the configured encoder, dump "
++                             "to this .npz and exit")
++    parser.add_argument("--query_emb_file", type=str, default=None,
++                        help="read query embeddings from a cache instead of loading the "
++                             "encoder. Lets N shard workers share one encoding pass")
 +    parser.add_argument("--edge_model_tag", type=str, default="em",
 +                        help="arm-name tag for this model, so a control model "
 +                             "trained on permuted labels gets its own dump")
@@ -212,7 +218,7 @@ index 40ee5b0..41b7a2d 100644
      parser.add_argument("--sim_mode", type=str, default="normalized",
                          choices=["normalized", "relu", "relu_sq"],
                          help="Similarity contrast function (default=normalized)")
-@@ -459,6 +548,18 @@ def main():
+@@ -459,6 +554,18 @@ def main():
      # ----------------------------------------------------------------
      config = PassageEntityConfig(
          llm_model=args.llm_model,
@@ -231,7 +237,7 @@ index 40ee5b0..41b7a2d 100644
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +620,8 @@ def main():
+@@ -519,6 +626,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -240,7 +246,7 @@ index 40ee5b0..41b7a2d 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +632,9 @@ def main():
+@@ -529,6 +638,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -250,11 +256,21 @@ index 40ee5b0..41b7a2d 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -536,7 +642,15 @@ def main():
+@@ -536,7 +648,25 @@ def main():
              raise ValueError(f"Unknown embedding model: {emb_key}")
          async def embed_func(texts):
              return np.array(_local_model.batch_encode(texts))
 -    embedding_model = EmbeddingModelWrapper(embed_func, batch_size=config.embedding_batch_size)
++
++    if args.query_emb_file:
++        # Nothing should need the encoder: passage/entity/fact vectors come from
++        # the index, query vectors from the cache. Fail loudly rather than
++        # silently loading a 7B model in each of N shard workers.
++        async def embed_func(texts):   # noqa: F811
++            raise RuntimeError(
++                f"encoder called with {len(texts)} texts despite --query_emb_file; "
++                "a code path needs embeddings the cache does not cover")
++        print(f"embedding: using cached query vectors from {args.query_emb_file}")
 +    # sentence-transformers checkpoints are not instruction-tuned, so the query
 +    # instruction must not be prepended to their input; every other encoder in
 +    # the registry expects it.
@@ -267,7 +283,7 @@ index 40ee5b0..41b7a2d 100644
  
      # ----------------------------------------------------------------
      # Load data
-@@ -608,6 +722,23 @@ def main():
+@@ -608,6 +738,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -291,7 +307,7 @@ index 40ee5b0..41b7a2d 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +757,19 @@ def main():
+@@ -626,6 +773,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -311,10 +327,37 @@ index 40ee5b0..41b7a2d 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +791,240 @@ def main():
+@@ -647,11 +807,267 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
++    if args.query_emb_file:
++        _qz = np.load(args.query_emb_file, allow_pickle=False)
++        _qs = list(_qz["questions"])
++        retriever._query_emb_fact = dict(zip(_qs, np.asarray(_qz["fact"], dtype=np.float32)))
++        retriever._query_emb_pass = dict(zip(_qs, np.asarray(_qz["passage"], dtype=np.float32)))
++        _missing = [q for q in all_queries if q not in retriever._query_emb_fact]
++        if _missing:
++            raise SystemExit(
++                f"\nFATAL: query cache covers {len(_qs)} questions but {len(_missing)} of "
++                f"this run's are absent, e.g. {_missing[0][:60]!r}\n"
++                "  Rebuild it with --cache_query_emb for this dataset.")
++        print(f"loaded {len(_qs)} cached query embeddings")
++
++    if args.cache_query_emb:
++        # Encode once, on one process with the GPU, so the shard workers never
++        # have to instantiate the encoder at all.
++        retriever._encode_queries(all_queries)
++        np.savez(args.cache_query_emb,
++                 questions=np.array(all_queries),
++                 fact=np.asarray([retriever._query_emb_fact[q] for q in all_queries],
++                                 dtype=np.float32),
++                 passage=np.asarray([retriever._query_emb_pass[q] for q in all_queries],
++                                    dtype=np.float32))
++        print(f"wrote {args.cache_query_emb}: {len(all_queries)} questions, "
++              f"dim {len(retriever._query_emb_fact[all_queries[0]])}")
++        return
++
 +    # ----------------------------------------------------------------
 +    # Offline-probe export. Dumps the graph and the frozen vectors so the
 +    # learnability question -- can any light model beat cosine at telling gold
@@ -552,7 +595,7 @@ index 40ee5b0..41b7a2d 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1085,9 @@ def main():
+@@ -712,7 +1128,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
