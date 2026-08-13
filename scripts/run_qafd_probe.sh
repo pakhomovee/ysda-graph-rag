@@ -275,9 +275,12 @@ dump_stem () {
         # of starting from "vanilla".
         subqedges) echo "edges-generated${SUFFIX}" ;;
         subqseeds) echo "seeds-generated${SUFFIX}" ;;
-        dpr)       echo "vanilla-dpr${SUFFIX}" ;;
-        edgemodel*) echo "vanilla-em${name#edgemodel}${SUFFIX}" ;;
-        em*)       echo "vanilla-em${name#em}${SUFFIX}" ;;
+        # benchmark_runner appends retrieval_mode and the edge-model tag AFTER
+        # the regime suffix, not before, so these two do not follow the pattern
+        # the oracle / exp / sink arms use.
+        dpr)       echo "vanilla${SUFFIX}-dpr" ;;
+        edgemodel*) echo "vanilla${SUFFIX}-em${name#edgemodel}" ;;
+        em*)       echo "vanilla${SUFFIX}-em${name#em}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
     esac
