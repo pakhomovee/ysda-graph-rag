@@ -277,6 +277,7 @@ dump_stem () {
         subqseeds) echo "seeds-generated${SUFFIX}" ;;
         dpr)       echo "vanilla-dpr${SUFFIX}" ;;
         edgemodel*) echo "vanilla-em${a#edgemodel}${SUFFIX}" ;;
+        em*)       echo "vanilla-em${a#em}${SUFFIX}" ;;
         vanilla)   echo "vanilla${SUFFIX}" ;;
         *)         echo "vanilla-${name}${SUFFIX}" ;;
     esac
@@ -372,8 +373,12 @@ arm_flags () {   # arm name -> benchmark_runner flags
         vanilla)   ;;
         dpr)       printf '%s\n' --retrieval_mode dpr ;;
         # trained w(u,v,q). edgemodel<beta> sets its dynamic range.
+        # em<beta> and edgemodel<beta> are the same arm; "edgemodel" reads as
+              # "edgemode1" often enough to be worth an alias.
         edgemodel*) printf '%s\n' --edge_model_file "$EDGE_MODEL" \
                         --edge_model_beta "${a#edgemodel}" ;;
+        em*)       printf '%s\n' --edge_model_file "$EDGE_MODEL" \
+                        --edge_model_beta "${a#em}" ;;
         # oracle<mult>[ent][seed] — ent drops the gold PASSAGE node (which is also a
         # ranking target) so the arm measures steering rather than mass landing on
         # the answer; seed spends the multiplier on source mass instead of edges.
