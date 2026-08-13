@@ -231,7 +231,16 @@ def main():
     #           target over unmodified entity->passage edges, so this measures
     #           steering. The gold entities are read off the graph (entity
     #           neighbours of the gold passage), not from an OpenIE sidecar.
-    ap.add_argument("--oracle_nodes", default="passages", choices=["passages", "entities"])
+    # entities-open: same gold entities, but their passage edges are LEFT IN (to
+    #           every passage, not just gold ones). The strict form above excludes
+    #           every passage-touching edge, which also removes the only route by
+    #           which entity relevance can reach the ranking -- so a negative
+    #           result there may be mass being starved out of the passage nodes
+    #           rather than steering failing. This is the arm a learned scorer
+    #           could actually imitate: recognise query-relevant entities, make
+    #           them more traversable, mark nothing.
+    ap.add_argument("--oracle_nodes", default="passages",
+                    choices=["passages", "entities", "entities-open"])
     ap.add_argument("--seed_top_k", type=int, default=5, help="entity seeds kept per query")
     ap.add_argument("--passage_node_weight", type=float, default=0.05)
     ap.add_argument("--topk", type=int, default=200)
@@ -314,14 +323,17 @@ def main():
     # cannot pump mass straight into a ranking target; see apply_oracle.
     entity_only_edges = ~(is_passage[eu] | is_passage[ev])
     if args.oracle_nodes == "entities":
-        print(f"    entity-only oracle: {int(entity_only_edges.sum())} of {len(eu)} "
-              f"edges are eligible (touch no passage node)")
+        print(f"    entity-only oracle (strict): {int(entity_only_edges.sum())} of "
+              f"{len(eu)} edges are eligible (touch no passage node)")
+    elif args.oracle_nodes == "entities-open":
+        print("    entity oracle (open): passage edges of gold entities are left in")
     os.makedirs(args.out_dir, exist_ok=True)
 
     for damping in args.damping:
         for arm in args.arms:
             scheme, mult, beta = arm_spec(arm)
-            _scope = "ent" if (args.oracle_nodes == "entities" and mult != 1.0) else ""
+            _scope = {"entities": "ent", "entities-open": "entopen"}.get(
+                args.oracle_nodes, "") if mult != 1.0 else ""
             tag = f"{arm}{_scope}-d{damping:g}"
             t0 = time.time()
             dump, cvs = {}, []
