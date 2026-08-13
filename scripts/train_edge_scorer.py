@@ -21,13 +21,18 @@ Split is by QUESTION. The model is evaluated on held-out questions, and
 --shuffle-control permutes the gold sets to check that nothing query-independent
 is being learned.
 
+    python scripts/train_edge_scorer.py musique --shuffle-control   # gate: AUC ~ 0.5
     python scripts/train_edge_scorer.py musique
-    python scripts/train_edge_scorer.py musique --shuffle-control
+
+--jobs parallelises the label pass, which is the expensive half: it runs BFS from
+every gold passage and tests the path condition against all ~850k edges, per
+question. Training itself is numpy matmuls, so it is already BLAS-threaded --
+control that with OMP_NUM_THREADS rather than --jobs.
 """
 
 import argparse
-import collections
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +82,61 @@ def bfs_levels(indptr, indices, start, n_nodes, max_dist):
     return dist
 
 
+# Read-only state for the label pass, inherited copy-on-write by forked workers.
+_G = {}
+
+
+def _label_question(qi):
+    """Edges on a shortest path between this question's gold passages, plus
+    negatives. Returns (edge_ids, labels, n_positive) or None.
+
+    Fully vectorised over the edge array. The obvious loop -- iterate the edges,
+    test the path condition, look the id up in a dict -- runs 850k times per gold
+    pair and dominated everything else in the script.
+    """
+    indptr, indices = _G["indptr"], _G["indices"]
+    edges, n_nodes = _G["edges"], _G["n_nodes"]
+    u_all, v_all = edges[:, 0], edges[:, 1]
+
+    vs = [_G["pid_to_vertex"][int(p)] for p in _G["gold_sets"][qi]]
+    pos = np.zeros(len(edges), dtype=bool)
+    for a in range(len(vs)):
+        da = bfs_levels(indptr, indices, vs[a], n_nodes, _G["max_dist"])
+        for b in range(a + 1, len(vs)):
+            t = vs[b]
+            if da[t] < 0:
+                continue
+            db = bfs_levels(indptr, indices, t, n_nodes, _G["max_dist"])
+            # (u,v) is on a shortest path vs[a] -> t iff traversing it advances
+            # the distance exactly, in either orientation.
+            du, dv = da[u_all], da[v_all]
+            bu, bv = db[u_all], db[v_all]
+            pos |= (du >= 0) & (bv >= 0) & (du + 1 + bv == da[t])
+            pos |= (dv >= 0) & (bu >= 0) & (dv + 1 + bu == da[t])
+    pos_ids = np.flatnonzero(pos)
+    if pos_ids.size == 0:
+        return None
+
+    rng = np.random.default_rng(_G["seed"] * 1000003 + qi)
+    n_pos_all = pos_ids.size
+    if pos_ids.size > _G["max_pos"]:
+        pos_ids = rng.choice(pos_ids, _G["max_pos"], replace=False)
+
+    # hard negatives: incident to a gold-path node but not themselves on a path
+    touched = np.unique(edges[pos_ids].ravel())
+    inc = np.flatnonzero((np.isin(u_all, touched) | np.isin(v_all, touched)) & ~pos)
+    n_hard = min(len(inc), _G["neg_per_pos"] * len(pos_ids) // 2)
+    hard = rng.choice(inc, n_hard, replace=False) if n_hard else np.empty(0, np.int64)
+    n_rand = _G["neg_per_pos"] * len(pos_ids) - n_hard
+    rand = rng.choice(len(edges), max(n_rand, 0), replace=False)
+    rand = rand[~pos[rand]]
+
+    sel = np.concatenate([pos_ids, hard, rand]).astype(np.int64)
+    lab = np.concatenate([np.ones(len(pos_ids)),
+                          np.zeros(len(hard) + len(rand))])
+    return sel, lab, n_pos_all
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset")
@@ -85,6 +145,12 @@ def main():
     ap.add_argument("--train-questions", type=int, default=700)
     ap.add_argument("--max-dist", type=int, default=6)
     ap.add_argument("--neg-per-pos", type=int, default=3)
+    ap.add_argument("--max-pos", type=int, default=400,
+                    help="cap on-path edges per question; bounds the feature "
+                         "block, which is |rows| x (4d+6) floats")
+    ap.add_argument("--jobs", type=int, default=8,
+                    help="processes for the label pass. Training itself is "
+                         "BLAS-threaded; set OMP_NUM_THREADS for that")
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--lr", type=float, default=0.003)
     ap.add_argument("--batch", type=int, default=8192)
@@ -117,9 +183,6 @@ def main():
     deg = np.bincount(np.concatenate([edges[:, 0], edges[:, 1]]),
                       minlength=n_nodes).astype(np.float32)
     indptr, indices = csr(edges, n_nodes)
-    eid = {(int(a), int(b)): i for i, (a, b) in enumerate(edges)}
-    eid.update({(b, a): i for (a, b), i in list(eid.items())})
-
     pid_to_vertex = {int(p): int(v) for p, v in zip(z["passage_pid"], pas_v)
                      if p >= 0 and v >= 0}
 
@@ -141,56 +204,36 @@ def main():
                    dtype=np.float32)
 
     # ---- label the edges -------------------------------------------------
-    rows_u, rows_v, rows_q, rows_y = [], [], [], []
-    on_path_total, skipped = 0, 0
-    for qi, pids in enumerate(gold_sets):
-        vs = [pid_to_vertex[int(p)] for p in pids]
-        pos = set()
-        for a in range(len(vs)):
-            da = bfs_levels(indptr, indices, vs[a], n_nodes, args.max_dist)
-            for b in range(a + 1, len(vs)):
-                t = vs[b]
-                if da[t] < 0:
-                    continue
-                db = bfs_levels(indptr, indices, t, n_nodes, args.max_dist)
-                # edge (u,v) is on a shortest path a->t iff it advances both ways
-                for u, v in edges[(da[edges[:, 0]] >= 0) & (db[edges[:, 1]] >= 0)]:
-                    u, v = int(u), int(v)
-                    if da[u] + 1 + db[v] == da[t]:
-                        pos.add(eid[(u, v)])
-                for u, v in edges[(da[edges[:, 1]] >= 0) & (db[edges[:, 0]] >= 0)]:
-                    u, v = int(u), int(v)
-                    if da[v] + 1 + db[u] == da[t]:
-                        pos.add(eid[(u, v)])
-        if not pos:
+    # Published to forked workers rather than pickled: the arrays are large and
+    # every worker only reads them.
+    _G.update(indptr=indptr, indices=indices, edges=edges, n_nodes=n_nodes,
+              pid_to_vertex=pid_to_vertex, gold_sets=gold_sets,
+              max_dist=args.max_dist, neg_per_pos=args.neg_per_pos,
+              max_pos=args.max_pos, seed=args.seed)
+
+    t0 = time.time()
+    if args.jobs > 1:
+        import concurrent.futures as cf, multiprocessing as mp
+        with cf.ProcessPoolExecutor(args.jobs, mp_context=mp.get_context("fork")) as ex:
+            labelled = list(ex.map(_label_question, range(len(qs)), chunksize=8))
+    else:
+        labelled = [_label_question(i) for i in range(len(qs))]
+
+    rows_e, rows_q, rows_y, on_path_total, skipped = [], [], [], 0, 0
+    for qi, out in enumerate(labelled):
+        if out is None:
             skipped += 1
             continue
-        on_path_total += len(pos)
-        pos = np.array(sorted(pos), dtype=np.int64)
+        sel, lab, n_pos = out
+        on_path_total += n_pos
+        rows_e.append(sel); rows_q.append(np.full(len(sel), qi)); rows_y.append(lab)
 
-        # hard negatives: edges touching a gold-path node but not on a path
-        touched = np.unique(edges[pos].ravel())
-        cand = np.unique(np.concatenate([
-            indices[indptr[t]:indptr[t + 1]] for t in touched[:200]]) ) if len(touched) else np.array([], np.int64)
-        inc = [eid[(int(a), int(b))] for a in touched[:200]
-               for b in indices[indptr[a]:indptr[a + 1]] if eid.get((int(a), int(b))) is not None]
-        inc = np.setdiff1d(np.array(inc, dtype=np.int64), pos)
-        n_hard = min(len(inc), args.neg_per_pos * len(pos) // 2)
-        hard = rng.choice(inc, n_hard, replace=False) if n_hard else np.array([], np.int64)
-        n_rand = args.neg_per_pos * len(pos) - len(hard)
-        rand = rng.choice(len(edges), max(n_rand, 0), replace=False)
-        rand = np.setdiff1d(rand, pos)
-
-        sel = np.concatenate([pos, hard, rand])
-        lab = np.concatenate([np.ones(len(pos)), np.zeros(len(hard) + len(rand))])
-        rows_u.append(edges[sel, 0]); rows_v.append(edges[sel, 1])
-        rows_q.append(np.full(len(sel), qi)); rows_y.append(lab)
-
-    U = np.concatenate(rows_u); V = np.concatenate(rows_v)
-    QI = np.concatenate(rows_q); Y = np.concatenate(rows_y).astype(np.float32)
-    print(f"labels: {len(Y)} edges over {len(qs) - skipped} questions "
-          f"({int(Y.sum())} positive, {on_path_total / max(len(qs) - skipped, 1):.1f} "
-          f"on-path edges per question; {skipped} questions had no connected gold pair)")
+    E = np.concatenate(rows_e); QI = np.concatenate(rows_q)
+    Y = np.concatenate(rows_y).astype(np.float32)
+    kept = len(qs) - skipped
+    print(f"labels: {len(Y)} edges over {kept} questions ({int(Y.sum())} positive, "
+          f"{on_path_total / max(kept, 1):.1f} on-path edges per question; "
+          f"{skipped} questions had no connected gold pair) in {time.time()-t0:.0f}s")
 
     order = rng.permutation(len(qs))
     tr_q = set(order[:args.train_questions].tolist())
@@ -199,10 +242,9 @@ def main():
           f"{tr.sum()} / {(~tr).sum()} edge rows")
 
     def feats(mask):
-        return build_features(H[U[mask]], H[V[mask]], Q[QI[mask]],
-                              deg[U[mask]], deg[V[mask]],
-                              ew[[eid[(int(a), int(b))] for a, b in
-                                  zip(U[mask], V[mask])]])
+        e = E[mask]
+        u, v = edges[e, 0], edges[e, 1]
+        return build_features(H[u], H[v], Q[QI[mask]], deg[u], deg[v], ew[e])
 
     Xtr, ytr = feats(tr), Y[tr]
     Xte, yte = feats(~tr), Y[~tr]
