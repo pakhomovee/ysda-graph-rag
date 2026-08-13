@@ -15,6 +15,11 @@ set -euo pipefail
 DEVICE=${DEVICE:-3}
 PORT=${PORT:-5679}
 MODEL=${MODEL:-openai/gpt-oss-20b}
+# The id the server answers to. QAFD derives working_dir from llm_model, so to
+# run against the authors' prebuilt KG (kg/multihop/<llm>_<emb>_<dataset>) the
+# served id has to equal the <llm> part of that directory name -- otherwise
+# llm_model either finds the KG or works for the reranker, never both.
+SERVED_NAME=${SERVED_NAME:-$MODEL}
 RESERVE_MIB=${RESERVE_MIB:-3000}   # headroom for a co-resident encoder
 WEIGHTS_MIB=${WEIGHTS_MIB:-14000}  # gpt-oss-20b MXFP4 weights, with slack
 MAXLEN=${MAXLEN:-8192}
@@ -41,7 +46,7 @@ cat <<EOF
 
 Point QAFD at it once it reports "Application startup complete":
   export LOCAL_LLM_BASE_URL="http://localhost:${PORT}/v1"
-  export LOCAL_LLM_MODEL="${MODEL}"
+  export LOCAL_LLM_MODEL="${SERVED_NAME}"
   export LOCAL_LLM_API_KEY="dummy"
 
 Verify the served id matches LOCAL_LLM_MODEL — a mismatch fails per request, so
@@ -52,6 +57,7 @@ EOF
 
 set -x
 CUDA_VISIBLE_DEVICES="$DEVICE" vllm serve "$MODEL" \
+    --served-model-name "$SERVED_NAME" \
     --port "$PORT" \
     --gpu-memory-utilization "$UTIL" \
     --max-model-len "$MAXLEN"
