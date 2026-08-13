@@ -241,6 +241,14 @@ def main():
     #           them more traversable, mark nothing.
     ap.add_argument("--oracle_nodes", default="passages",
                     choices=["passages", "entities", "entities-open"])
+    # Which site the oracle multiplier is spent on. Keeping them separable is the
+    # lesson from LinearRAG, where a gate improved the frontier while seeding
+    # stayed pooled and the two effects could not be told apart afterwards. PPR
+    # takes the query at exactly two places -- reset and (once we add it) the edge
+    # weights -- so this compares the ceilings of both IN THE SAME ALGORITHM.
+    ap.add_argument("--oracle_site", default="edges", choices=["edges", "seeds"],
+                    help="edges: scale gold-incident edge weights. "
+                         "seeds: scale the gold entries of the reset vector instead")
     ap.add_argument("--seed_top_k", type=int, default=5, help="entity seeds kept per query")
     ap.add_argument("--passage_node_weight", type=float, default=0.05)
     ap.add_argument("--topk", type=int, default=200)
@@ -332,8 +340,11 @@ def main():
     for damping in args.damping:
         for arm in args.arms:
             scheme, mult, beta = arm_spec(arm)
-            _scope = {"entities": "ent", "entities-open": "entopen"}.get(
-                args.oracle_nodes, "") if mult != 1.0 else ""
+            _scope = ""
+            if mult != 1.0:
+                _scope = {"entities": "ent", "entities-open": "entopen"}.get(args.oracle_nodes, "")
+                if args.oracle_site == "seeds":
+                    _scope += "seed"
             tag = f"{arm}{_scope}-d{damping:g}"
             t0 = time.time()
             dump, cvs = {}, []
@@ -371,9 +382,16 @@ def main():
                             # graph: passage->entity edges are how the extraction
                             # is recorded, so no OpenIE sidecar is needed.
                             gold_v.update(nb for nb in graph.neighbors(v) if is_entity[nb])
-                    if args.oracle_nodes == "entities":
-                        eligible = entity_only_edges
-                    w = apply_oracle(w, eu, ev, gold_v, mult, eligible)
+                    if args.oracle_site == "seeds":
+                        # A seed with zero weight stays zero: the multiplier scales
+                        # what seeding already found rather than introducing seeds
+                        # of its own, which would be a different intervention.
+                        for v in gold_v:
+                            reset[v] *= mult
+                    else:
+                        if args.oracle_nodes == "entities":
+                            eligible = entity_only_edges
+                        w = apply_oracle(w, eu, ev, gold_v, mult, eligible)
                 # prpack rejects non-positive weights; keep the graph connected
                 w = np.maximum(w, 1e-12)
 
