@@ -247,9 +247,21 @@ def main():
     print(f"split: {len(tr_q)} train questions, {len(qs) - len(tr_q)} held out; "
           f"{tr.sum()} / {(~tr).sum()} edge rows")
 
+    # Half the rows get their endpoints swapped. The features are
+    # orientation-sensitive -- h_u*h_q and h_v*h_q are different column blocks --
+    # but training saw each edge only in the arbitrary orientation igraph stored
+    # it in, while the diffusion queries _get_edge_weight(pusher, neighbour) and
+    # therefore presents about half of them reversed. Without this the model is
+    # asked at inference for a configuration it never saw, which would corrupt
+    # the steering while leaving both the held-out AUC and routing_cv intact,
+    # since those are measured in the training orientation.
+    flip = rng.random(len(E)) < 0.5
+
     def feats(mask):
         e = E[mask]
-        u, v = edges[e, 0], edges[e, 1]
+        u, v = edges[e, 0].copy(), edges[e, 1].copy()
+        f = flip[mask]
+        u[f], v[f] = edges[e[f], 1], edges[e[f], 0]
         return build_features(H[u], H[v], Q[QI[mask]], deg[u], deg[v], ew[e])
 
     Xtr, ytr = feats(tr), Y[tr]
