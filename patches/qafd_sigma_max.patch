@@ -82,7 +82,7 @@ index 7fd5e1e..9f36bf3 100644
 +__all__ = ['JinaV3EmbeddingModel', 'NVEmbedV2EmbeddingModel', 'OpenAIEmbeddingModel',
 +           'GritLMEmbeddingModel', 'STEmbeddingModel']
 diff --git a/src/passage_entity/benchmark_runner.py b/src/passage_entity/benchmark_runner.py
-index 40ee5b0..0dde3a9 100644
+index 40ee5b0..be8a4dd 100644
 --- a/src/passage_entity/benchmark_runner.py
 +++ b/src/passage_entity/benchmark_runner.py
 @@ -40,6 +40,33 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
@@ -237,7 +237,28 @@ index 40ee5b0..0dde3a9 100644
          llm_base_url=args.llm_base_url,
          llm_api_key=args.llm_api_key,
          embedding_model_key=args.embedding_model,
-@@ -519,6 +626,8 @@ def main():
+@@ -507,7 +614,19 @@ def main():
+     # Embedding function (must match the model used to build the KG)
+     # ----------------------------------------------------------------
+     emb_key = config.embedding_model_key
+-    if emb_key in ("openai-small", "openai-large"):
++    if args.query_emb_file:
++        # Nothing should need the encoder: passage/entity/fact vectors come from
++        # the index, query vectors from the cache. This branch comes FIRST so the
++        # encoder is never CONSTRUCTED either — NV-Embed-v2 is 7B and loads with
++        # device_map="auto", i.e. onto the GPU, in every one of N shard workers,
++        # which is exactly what caching the query vectors was meant to avoid.
++        # Fail loudly if some path still asks for an embedding.
++        async def embed_func(texts):
++            raise RuntimeError(
++                f"encoder called with {len(texts)} texts despite --query_emb_file; "
++                "a code path needs embeddings the cache does not cover")
++        print(f"embedding: using cached query vectors from {args.query_emb_file}")
++    elif emb_key in ("openai-small", "openai-large"):
+         openai_model = "text-embedding-3-small" if emb_key == "openai-small" else "text-embedding-3-large"
+         async def embed_func(texts):
+             return await _openai_embed(texts, model=openai_model, api_key=_api_key)
+@@ -519,6 +638,8 @@ def main():
                  "nvidia-nv-embed-v2": "nvidia/NV-Embed-v2",
                  "jina-v3": "jinaai/jina-embeddings-v3",
                  "gritlm": "GritLM/GritLM-7B",
@@ -246,7 +267,7 @@ index 40ee5b0..0dde3a9 100644
              }.get(emb_key, emb_key),
              "embedding_batch_size": config.embedding_batch_size,
          })()
-@@ -529,6 +638,9 @@ def main():
+@@ -529,6 +650,9 @@ def main():
          elif emb_key == "jina-v3":
              _mod = _load_mod("src.embedding_models.JinaV3", os.path.join(_emb_src, "JinaV3.py"))
              _local_model = _mod.JinaV3EmbeddingModel(_emb_cfg)
@@ -256,21 +277,12 @@ index 40ee5b0..0dde3a9 100644
          elif emb_key == "gritlm":
              _mod = _load_mod("src.embedding_models.GritLM", os.path.join(_emb_src, "GritLM.py"))
              _local_model = _mod.GritLMEmbeddingModel(_emb_cfg)
-@@ -536,7 +648,25 @@ def main():
+@@ -536,7 +660,16 @@ def main():
              raise ValueError(f"Unknown embedding model: {emb_key}")
          async def embed_func(texts):
              return np.array(_local_model.batch_encode(texts))
 -    embedding_model = EmbeddingModelWrapper(embed_func, batch_size=config.embedding_batch_size)
 +
-+    if args.query_emb_file:
-+        # Nothing should need the encoder: passage/entity/fact vectors come from
-+        # the index, query vectors from the cache. Fail loudly rather than
-+        # silently loading a 7B model in each of N shard workers.
-+        async def embed_func(texts):   # noqa: F811
-+            raise RuntimeError(
-+                f"encoder called with {len(texts)} texts despite --query_emb_file; "
-+                "a code path needs embeddings the cache does not cover")
-+        print(f"embedding: using cached query vectors from {args.query_emb_file}")
 +    # sentence-transformers checkpoints are not instruction-tuned, so the query
 +    # instruction must not be prepended to their input; every other encoder in
 +    # the registry expects it.
@@ -283,7 +295,7 @@ index 40ee5b0..0dde3a9 100644
  
      # ----------------------------------------------------------------
      # Load data
-@@ -608,6 +738,23 @@ def main():
+@@ -608,6 +741,23 @@ def main():
          except Exception:
              gold_docs = None
  
@@ -307,7 +319,7 @@ index 40ee5b0..0dde3a9 100644
      print("=" * 70)
      print(f"  Graph type:  passage-entity")
      print(f"  Task:        {args.task}")
-@@ -626,6 +773,19 @@ def main():
+@@ -626,6 +776,19 @@ def main():
      builder = KGBuilder(config, embedding_model, openie)
  
      if builder.graph.vcount() > 0 and not config.force_index_from_scratch:
@@ -327,7 +339,7 @@ index 40ee5b0..0dde3a9 100644
          logger.info(f"Using existing KG: {config.working_dir} "
                       f"({builder.graph.vcount()} nodes, {builder.graph.ecount()} edges)")
      else:
-@@ -647,11 +807,267 @@ def main():
+@@ -647,11 +810,283 @@ def main():
          openie_results_path=builder.openie_results_path,
      )
  
@@ -347,14 +359,30 @@ index 40ee5b0..0dde3a9 100644
 +    if args.cache_query_emb:
 +        # Encode once, on one process with the GPU, so the shard workers never
 +        # have to instantiate the encoder at all.
-+        retriever._encode_queries(all_queries)
++        _to_cache = list(all_queries)
++        if args.subq_file:
++            # The sigma_max arms embed the SUB-questions too, and those are not
++            # in all_queries — a cache without them dies in the encoder stub on
++            # the first question that has a set. Ask the retriever for the sets
++            # rather than re-reading the file: the lookup normalises the
++            # question, so this caches exactly the strings it will ask for.
++            _seen = set(_to_cache)
++            for _q in all_queries:
++                for _s in retriever._query_set(_q):
++                    if _s not in _seen:
++                        _seen.add(_s)
++                        _to_cache.append(_s)
++            print(f"including {len(_to_cache) - len(all_queries)} sub-questions "
++                  f"from {args.subq_file}")
++        retriever._encode_queries(_to_cache)
 +        np.savez(args.cache_query_emb,
-+                 questions=np.array(all_queries),
-+                 fact=np.asarray([retriever._query_emb_fact[q] for q in all_queries],
++                 questions=np.array(_to_cache),
++                 fact=np.asarray([retriever._query_emb_fact[q] for q in _to_cache],
 +                                 dtype=np.float32),
-+                 passage=np.asarray([retriever._query_emb_pass[q] for q in all_queries],
++                 passage=np.asarray([retriever._query_emb_pass[q] for q in _to_cache],
 +                                    dtype=np.float32))
-+        print(f"wrote {args.cache_query_emb}: {len(all_queries)} questions, "
++        print(f"wrote {args.cache_query_emb}: {len(_to_cache)} texts "
++              f"({len(all_queries)} questions), "
 +              f"dim {len(retriever._query_emb_fact[all_queries[0]])}")
 +        return
 +
@@ -595,7 +623,7 @@ index 40ee5b0..0dde3a9 100644
      # ----------------------------------------------------------------
      # Retrieval evaluation
      # ----------------------------------------------------------------
-@@ -712,7 +1128,9 @@ def main():
+@@ -712,7 +1147,9 @@ def main():
      # Save results
      # ----------------------------------------------------------------
      os.makedirs(config.working_dir, exist_ok=True)
