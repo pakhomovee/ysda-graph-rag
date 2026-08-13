@@ -939,6 +939,29 @@ index b8d98b3..680c454 100644
      )
  
      node_scores = qafd.run(batch_push=batch_push)
+diff --git a/src/passage_entity/kg_builder.py b/src/passage_entity/kg_builder.py
+index 8c8664d..ace3232 100644
+--- a/src/passage_entity/kg_builder.py
++++ b/src/passage_entity/kg_builder.py
+@@ -144,6 +144,18 @@ class KGBuilder:
+             config.save_dir,
+             f"openie_results_ner_{config.llm_model.replace('/', '_')}.json",
+         )
++        # A downloaded bundle ships its OpenIE results INSIDE the KG directory;
++        # save_dir is only where our own indexing run would have written them.
++        # The retriever guards this path with a bare os.path.isfile, so a miss is
++        # silent -- ent_node_to_chunk_ids stays empty and entity seed weights
++        # lose their chunk-frequency division (retriever.py: `wfs /= num_chunks`).
++        # That is a different seeding rule, not a missing optimisation, and
++        # nothing would report it. Prefer the bundled copy when save_dir has none.
++        if not os.path.isfile(self.openie_results_path):
++            _bundled = os.path.join(wd, os.path.basename(self.openie_results_path))
++            if os.path.isfile(_bundled):
++                logger.info(f"Using OpenIE results from the KG directory: {_bundled}")
++                self.openie_results_path = _bundled
+ 
+         self.graph: ig.Graph = self._load_or_create_graph()
+         self.node_to_node_stats: Dict[Tuple[str, str], float] = {}
 diff --git a/src/passage_entity/openie.py b/src/passage_entity/openie.py
 index b728039..fa83910 100644
 --- a/src/passage_entity/openie.py
@@ -978,7 +1001,7 @@ index b728039..fa83910 100644
          )
  
 diff --git a/src/passage_entity/retriever.py b/src/passage_entity/retriever.py
-index e2b2da2..a91d81b 100644
+index e2b2da2..a54c318 100644
 --- a/src/passage_entity/retriever.py
 +++ b/src/passage_entity/retriever.py
 @@ -83,6 +83,13 @@ class PassageEntityRetriever:
@@ -995,7 +1018,24 @@ index e2b2da2..a91d81b 100644
          # Timing accumulators
          self.rerank_time = 0.0
          self.qafd_time = 0.0
-@@ -151,6 +158,51 @@ class PassageEntityRetriever:
+@@ -127,6 +134,16 @@ class PassageEntityRetriever:
+ 
+         # Build ent_node_to_chunk_ids from openie results
+         self.ent_node_to_chunk_ids = {}
++        if not os.path.isfile(self.openie_results_path) and self.entity_node_keys:
++            # Only worth saying when the graph is already populated: during a
++            # fresh index run the file does not exist yet and that is normal.
++            # With a prebuilt KG it means the entity seed weights silently lose
++            # their chunk-frequency division, and the oracle arms resolve nothing.
++            logger.warning(
++                f"no OpenIE results at {self.openie_results_path} — "
++                "ent_node_to_chunk_ids will be empty, entity seed weights will "
++                "NOT be divided by chunk frequency, and any oracle arm will "
++                "report boosted_edges=0")
+         if os.path.isfile(self.openie_results_path):
+             all_info = json.load(open(self.openie_results_path)).get("docs", [])
+             ner_dict, triple_dict = reformat_openie_results(all_info)
+@@ -151,6 +168,51 @@ class PassageEntityRetriever:
      # Query embedding
      # ------------------------------------------------------------------
  
@@ -1047,7 +1087,7 @@ index e2b2da2..a91d81b 100644
      def _encode_queries(self, queries: List[str]):
          to_encode = [q for q in queries if q not in self._query_emb_fact]
          if not to_encode:
-@@ -171,15 +223,21 @@ class PassageEntityRetriever:
+@@ -171,15 +233,21 @@ class PassageEntityRetriever:
      # ------------------------------------------------------------------
  
      def _get_fact_scores(self, query: str) -> np.ndarray:
@@ -1072,7 +1112,7 @@ index e2b2da2..a91d81b 100644
          return min_max_normalize(scores)
  
      # ------------------------------------------------------------------
-@@ -297,6 +355,14 @@ class PassageEntityRetriever:
+@@ -297,6 +365,14 @@ class PassageEntityRetriever:
  
          # --- passage seed weights ---
          dpr_ids, dpr_scores = self._dense_passage_retrieval(query)
@@ -1087,7 +1127,7 @@ index e2b2da2..a91d81b 100644
          norm_dpr = min_max_normalize(dpr_scores)
          pw = self.config.passage_node_weight
  
-@@ -308,6 +374,22 @@ class PassageEntityRetriever:
+@@ -308,6 +384,22 @@ class PassageEntityRetriever:
  
          node_weights = phrase_weights + passage_weights
  
@@ -1110,7 +1150,7 @@ index e2b2da2..a91d81b 100644
          if np.sum(node_weights) == 0:
              logger.warning("All node weights are zero after seed selection, falling back to DPR")
              return dpr_ids, dpr_scores
-@@ -322,7 +404,26 @@ class PassageEntityRetriever:
+@@ -322,7 +414,26 @@ class PassageEntityRetriever:
                  if i < len(self.passage_embeddings):
                      self._node_emb_dict[nk] = self.passage_embeddings[i]
  
@@ -1138,7 +1178,7 @@ index e2b2da2..a91d81b 100644
  
          # --- Run QAFD ---
          qafd_start = time.time()
-@@ -348,6 +449,12 @@ class PassageEntityRetriever:
+@@ -348,6 +459,12 @@ class PassageEntityRetriever:
              qa_accum_gamma=self.config.qa_accum_gamma,
              qa_post_lambda=self.config.qa_post_lambda,
              batch_push=self.config.batch_push,
