@@ -398,6 +398,14 @@ def main():
                          "model must collapse to AUC~0.5; if it does not, the "
                          "labels leak and no other number here means anything.")
     ap.add_argument("--device", default="cpu", help="passed to sentence-transformers")
+    # An export from a 7B-encoder index carries 4096-d entity vectors, and encoding
+    # the questions with mpnet would score them in a different space -- silently,
+    # since a dot product between mismatched spaces is still a number. Read the
+    # cached query vectors instead, the same ones the retrieval runs used.
+    ap.add_argument("--query_emb", type=Path, default=None,
+                    help="npz from --cache_query_emb; required when --nodes came "
+                         "from an index built with something other than mpnet")
+    ap.add_argument("--query_emb_kind", default="passage", choices=["passage", "fact"])
     args = ap.parse_args()
 
     npz_path = args.nodes or OUT / f"qafd_nodes_{args.dataset}.npz"
@@ -445,11 +453,29 @@ def main():
     # Encode questions with the same checkpoint the index used. STEncoder ignores
     # instruction kwargs for mpnet, so QAFD's query_to_fact instruction never
     # reached the encoder either — plain encoding is what the pipeline compares.
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(EMB_MODEL, device=args.device)
-    q_emb = np.asarray(model.encode([q.question for q in queries],
-                                    normalize_embeddings=True, convert_to_numpy=True,
-                                    show_progress_bar=False), dtype=np.float32)
+    if args.query_emb:
+        _qz = np.load(args.query_emb, allow_pickle=False)
+        _qmap = {q: i for i, q in enumerate(_qz["questions"])}
+        _missing = [q for q in queries if q.question not in _qmap]
+        if _missing:
+            sys.exit(f"\nFATAL: {len(_missing)} questions absent from {args.query_emb}, "
+                     f"e.g. {_missing[0].question[:60]!r}")
+        _Q = np.asarray(_qz[args.query_emb_kind], dtype=np.float32)
+        _Q /= np.maximum(np.linalg.norm(_Q, axis=1, keepdims=True), 1e-12)
+        q_emb = np.stack([_Q[_qmap[q.question]] for q in queries])
+        print(f"queries: {len(q_emb)} cached vectors from {args.query_emb.name}, "
+              f"dim {q_emb.shape[1]}")
+    else:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer(EMB_MODEL, device=args.device)
+        q_emb = np.asarray(model.encode([q.question for q in queries],
+                                        normalize_embeddings=True, convert_to_numpy=True,
+                                        show_progress_bar=False), dtype=np.float32)
+    if q_emb.shape[1] != ent_emb.shape[1]:
+        sys.exit(f"\nFATAL: query vectors are {q_emb.shape[1]}-d but the node export is "
+                 f"{ent_emb.shape[1]}-d.\n  Every model here scores h_e against h_q, so "
+                 "these must come from ONE encoder.\n  Pass --query_emb for a non-mpnet "
+                 "index.")
 
     order = rng.permutation(len(queries))
     tr, te = order[:args.train_questions], order[args.train_questions:]
