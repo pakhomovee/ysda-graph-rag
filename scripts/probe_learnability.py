@@ -107,7 +107,7 @@ def _adam(params, grads, state, lr):
 # Objective, set once per process before training. A module global rather than a
 # parameter because the three models call the gradient helper directly and the
 # workers inherit this by fork.
-_OBJ = {"loss": "pointwise", "starts": None}
+_OBJ = {"loss": "pointwise", "starts": None, "k": 10}
 
 
 def _group_starts(qi):
@@ -145,6 +145,55 @@ def _listwise_grad(s, y, starts):
     return 0.0, ds / max(len(starts) - 1, 1)
 
 
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
+
+
+def _pairwise_grad(s, y, starts, k=None):
+    """RankNet over (positive, negative) pairs, optionally LambdaRank-weighted.
+
+    The listwise softmax above is rank-aware but position-blind: a positive at
+    rank 3 and one at rank 300 contribute the same term, so nothing in the
+    objective knows where the recall@k cutoff is.
+
+    With k set, each pair is weighted by |delta recall@k| -- the change swapping it
+    would produce. For recall@k that is 1/|positives| when exactly one of the two
+    sits inside the top k, and ZERO otherwise. So the gradient lands only on pairs
+    that straddle the cutoff: negatives currently occupying a top-k slot, and the
+    positives they are keeping out. That is the metric written into the loss
+    rather than hoped for.
+
+    The weights are computed from the current ranking and held constant for the
+    step (the standard LambdaRank detachment -- the weights are piecewise constant
+    in s, so they carry no gradient of their own). The finite-difference check in
+    --selftest verifies the gradient of exactly that surrogate.
+    """
+    ds = np.zeros_like(s)
+    groups = 0
+    for a, b in zip(starts[:-1], starts[1:]):
+        sg, yg = s[a:b], y[a:b]
+        pi = np.flatnonzero(yg > 0)
+        ni = np.flatnonzero(yg <= 0)
+        if len(pi) == 0 or len(ni) == 0:
+            continue
+        d = sg[pi][:, None] - sg[ni][None, :]
+        if k is None:
+            w = np.full(d.shape, 1.0 / d.size)
+        else:
+            order = np.argsort(-sg)
+            rank = np.empty(len(sg), dtype=np.int64)
+            rank[order] = np.arange(len(sg))
+            pos_out = (rank[pi] >= k)[:, None]      # positive missing the cutoff
+            neg_in = (rank[ni] < k)[None, :]        # negative holding a slot
+            w = (pos_out & neg_in).astype(np.float64) / len(pi)
+        g = -_sigmoid(-d) * w                        # dL/d(s_pos - s_neg)
+        view = ds[a:b]
+        view[pi] += g.sum(1)
+        view[ni] -= g.sum(0)
+        groups += 1
+    return 0.0, ds / max(groups, 1)
+
+
 def _recall_at_k(scores, y, starts, k=10):
     """Mean per-question recall@k -- the statistic the pipeline actually spends."""
     tot, n = 0.0, 0
@@ -161,15 +210,20 @@ def _recall_at_k(scores, y, starts, k=10):
 
 def _loss_grad(s, y):
     """Mean BCE-with-logits and dL/ds, or the listwise objective when selected."""
-    if _OBJ["loss"] == "listwise" and _OBJ["starts"] is not None:
-        return _listwise_grad(s, y, _OBJ["starts"])
+    if _OBJ["starts"] is not None:
+        if _OBJ["loss"] == "listwise":
+            return _listwise_grad(s, y, _OBJ["starts"])
+        if _OBJ["loss"] == "pairwise":
+            return _pairwise_grad(s, y, _OBJ["starts"], k=None)
+        if _OBJ["loss"] == "lambdarank":
+            return _pairwise_grad(s, y, _OBJ["starts"], k=_OBJ["k"])
     p = 1.0 / (1.0 + np.exp(-np.clip(s, -30, 30)))
     loss = -np.mean(y * np.log(p + 1e-12) + (1 - y) * np.log(1 - p + 1e-12))
     return loss, (p - y) / len(y)
 
 
 def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5,
-                   select="auc", qi=None, loss="pointwise"):
+                   select="auc", qi=None, loss="pointwise", lambda_k=10):
     """Train, keeping the parameters that scored best on the SELECTION metric.
 
     select="auc" checkpoints on validation ROC-AUC, which ranks all ~2000
@@ -197,9 +251,10 @@ def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5
     ytr, yva = y[tr], y[val]
     tr_starts = _group_starts(qi[tr]) if qi is not None else None
     va_starts = _group_starts(qi[val]) if qi is not None else None
-    if loss == "listwise" and tr_starts is None:
+    if loss != "pointwise" and tr_starts is None:
         raise ValueError("listwise needs per-question row groups (qi)")
     _OBJ["loss"], _OBJ["starts"] = loss, tr_starts
+    _OBJ["k"] = lambda_k
     st = {}
     best = (-np.inf, [p.copy() for p in model._params()])
     for ep in range(1, epochs + 1):
@@ -371,7 +426,8 @@ def _train_one(model):
     return fit_early_stop(model, _SHARED["He"], _SHARED["Hq"], _SHARED["Y"],
                           _SHARED["Dg"], _SHARED["val"], lr=_SHARED["lr"],
                           select=_SHARED.get("select", "auc"),
-                          qi=_SHARED.get("Qi"), loss=_SHARED.get("loss", "pointwise"))
+                          qi=_SHARED.get("Qi"), loss=_SHARED.get("loss", "pointwise"),
+                          lambda_k=_SHARED.get("lambda_k", 10))
 
 
 def build_pool(positives):
@@ -484,10 +540,16 @@ def main():
     # The three knobs that decide WHICH ranking the training targets. Defaults
     # reproduce every run so far; none of them changes the evaluation, so results
     # stay comparable across settings.
-    ap.add_argument("--loss", default="pointwise", choices=["pointwise", "listwise"],
+    ap.add_argument("--loss", default="pointwise",
+                    choices=["pointwise", "listwise", "pairwise", "lambdarank"],
                     help="pointwise BCE weights every row equally and optimises a "
                          "global order; listwise is a per-question softmax and puts "
-                         "the gradient on negatives that currently outrank positives")
+                         "the gradient on negatives that currently outrank positives; "
+                         "pairwise is RankNet over pos/neg pairs; lambdarank weights "
+                         "each pair by the recall@k change swapping it would cause, "
+                         "which puts all gradient on pairs straddling the cutoff")
+    ap.add_argument("--lambda-k", type=int, default=10,
+                    help="the k in lambdarank's recall@k weighting")
     ap.add_argument("--select", default="auc", choices=["auc", "recall"],
                     help="early-stopping metric: validation ROC-AUC, or mean "
                          "per-question recall@10")
@@ -625,7 +687,7 @@ def main():
           f"{val.sum()} held out for early stopping ({len(val_q)} questions)")
 
     _SHARED.update(He=He, Hq=Hq, Y=Y, Dg=Dg, val=val, lr=args.lr, Qi=Qi,
-                   select=args.select, loss=args.loss)
+                   select=args.select, loss=args.loss, lambda_k=args.lambda_k)
     todo = [Diagonal(d, seed=args.seed),
             LowRank(d, r=args.rank, seed=args.seed),
             MLP(d, seed=args.seed)]
