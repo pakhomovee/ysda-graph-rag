@@ -107,119 +107,18 @@ def _adam(params, grads, state, lr):
 # Objective, set once per process before training. A module global rather than a
 # parameter because the three models call the gradient helper directly and the
 # workers inherit this by fork.
-_OBJ = {"loss": "pointwise", "starts": None, "k": 10}
-
-
-def _group_starts(qi):
-    """Boundaries of contiguous per-question row blocks.
-
-    Rows are built one question at a time and the validation split removes whole
-    questions, so each question's rows stay contiguous and a single boundary
-    array describes them.
-    """
-    if len(qi) == 0:
-        return np.array([0], dtype=np.int64)
-    cuts = np.flatnonzero(np.diff(qi) != 0) + 1
-    return np.concatenate([[0], cuts, [len(qi)]]).astype(np.int64)
-
-
-def _listwise_grad(s, y, starts):
-    """Per-question softmax cross-entropy, and dL/ds.
-
-    Pointwise BCE spends the same gradient on every row whatever its rank, which
-    is why it lifts AUC -- a global-order statistic over ~2000 candidates -- while
-    leaving the top of each question's list untouched. A per-question softmax puts
-    the gradient on whichever negatives currently outscore the positives, i.e. on
-    exactly the rows that decide recall@k, and it does so WITHOUT changing the
-    negative distribution -- which the pool comment below explains has to stay
-    identical in training and evaluation or the model inverts.
-    """
-    ds = np.zeros_like(s)
-    for a, b in zip(starts[:-1], starts[1:]):
-        yg = y[a:b]
-        tot = yg.sum()
-        if tot <= 0:
-            continue
-        e = np.exp(s[a:b] - s[a:b].max())
-        ds[a:b] = e / e.sum() - yg / tot
-    return 0.0, ds / max(len(starts) - 1, 1)
-
-
-def _sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
-
-
-def _pairwise_grad(s, y, starts, k=None):
-    """RankNet over (positive, negative) pairs, optionally LambdaRank-weighted.
-
-    The listwise softmax above is rank-aware but position-blind: a positive at
-    rank 3 and one at rank 300 contribute the same term, so nothing in the
-    objective knows where the recall@k cutoff is.
-
-    With k set, each pair is weighted by |delta recall@k| -- the change swapping it
-    would produce. For recall@k that is 1/|positives| when exactly one of the two
-    sits inside the top k, and ZERO otherwise. So the gradient lands only on pairs
-    that straddle the cutoff: negatives currently occupying a top-k slot, and the
-    positives they are keeping out. That is the metric written into the loss
-    rather than hoped for.
-
-    The weights are computed from the current ranking and held constant for the
-    step (the standard LambdaRank detachment -- the weights are piecewise constant
-    in s, so they carry no gradient of their own). The finite-difference check in
-    --selftest verifies the gradient of exactly that surrogate.
-    """
-    ds = np.zeros_like(s)
-    groups = 0
-    for a, b in zip(starts[:-1], starts[1:]):
-        sg, yg = s[a:b], y[a:b]
-        pi = np.flatnonzero(yg > 0)
-        ni = np.flatnonzero(yg <= 0)
-        if len(pi) == 0 or len(ni) == 0:
-            continue
-        d = sg[pi][:, None] - sg[ni][None, :]
-        if k is None:
-            w = np.full(d.shape, 1.0 / d.size)
-        else:
-            order = np.argsort(-sg)
-            rank = np.empty(len(sg), dtype=np.int64)
-            rank[order] = np.arange(len(sg))
-            pos_out = (rank[pi] >= k)[:, None]      # positive missing the cutoff
-            neg_in = (rank[ni] < k)[None, :]        # negative holding a slot
-            w = (pos_out & neg_in).astype(np.float64) / len(pi)
-        g = -_sigmoid(-d) * w                        # dL/d(s_pos - s_neg)
-        view = ds[a:b]
-        view[pi] += g.sum(1)
-        view[ni] -= g.sum(0)
-        groups += 1
-    return 0.0, ds / max(groups, 1)
-
-
-def _recall_at_k(scores, y, starts, k=10):
-    """Mean per-question recall@k -- the statistic the pipeline actually spends."""
-    tot, n = 0.0, 0
-    for a, b in zip(starts[:-1], starts[1:]):
-        yg = y[a:b]
-        g = yg.sum()
-        if g <= 0:
-            continue
-        top = np.argsort(-scores[a:b])[:k]
-        tot += yg[top].sum() / g
-        n += 1
-    return tot / max(n, 1)
-
-
-def _loss_grad(s, y):
-    """Mean BCE-with-logits and dL/ds, or the listwise objective when selected."""
-    if _OBJ["starts"] is not None:
-        if _OBJ["loss"] == "listwise":
-            return _listwise_grad(s, y, _OBJ["starts"])
-        if _OBJ["loss"] == "pairwise":
-            return _pairwise_grad(s, y, _OBJ["starts"], k=None)
-        if _OBJ["loss"] == "lambdarank":
-            return _pairwise_grad(s, y, _OBJ["starts"], k=_OBJ["k"])
-    p = 1.0 / (1.0 + np.exp(-np.clip(s, -30, 30)))
-    loss = -np.mean(y * np.log(p + 1e-12) + (1 - y) * np.log(1 - p + 1e-12))
-    return loss, (p - y) / len(y)
+# The ranking objectives live in mbuzai.ranking: two trainers use them now, and a
+# second copy is how a train/inference disagreement gets introduced. The aliases keep
+# this script's internal names, so nothing below moved.
+from mbuzai.ranking import (  # noqa: E402
+    group_starts as _group_starts,
+    listwise_grad as _listwise_grad,
+    pairwise_grad as _pairwise_grad,
+    recall_at_k as _recall_at_k,
+    sigmoid as _sigmoid,
+    make_grad_fn,
+    roc_auc,
+)
 
 
 def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5,
@@ -251,14 +150,11 @@ def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5
     ytr, yva = y[tr], y[val]
     tr_starts = _group_starts(qi[tr]) if qi is not None else None
     va_starts = _group_starts(qi[val]) if qi is not None else None
-    if loss != "pointwise" and tr_starts is None:
-        raise ValueError("listwise needs per-question row groups (qi)")
-    _OBJ["loss"], _OBJ["starts"] = loss, tr_starts
-    _OBJ["k"] = lambda_k
+    grad_fn = make_grad_fn(loss, tr_starts, lambda_k)
     st = {}
     best = (-np.inf, [p.copy() for p in model._params()])
     for ep in range(1, epochs + 1):
-        model._step(ptr, ytr, st, lr)
+        model._step(ptr, ytr, st, lr, grad_fn)
         if ep % eval_every == 0 or ep == epochs:
             sv = model.score_prepped(pva)
             score = (roc_auc(sv, yva) if select == "auc"
@@ -316,8 +212,8 @@ class Diagonal:
     def prep(self, he, hq, deg):
         return he * hq          # the only thing the gradient needs
 
-    def _step(self, P, y, st, lr):
-        _, ds = _loss_grad(P @ self.w + self.b, y)
+    def _step(self, P, y, st, lr, grad_fn):
+        _, ds = grad_fn(P @ self.w + self.b, y)
         _adam(self._params(), [P.T @ ds, np.array([ds.sum()])], st, lr)
 
     def score_prepped(self, P):
@@ -352,10 +248,10 @@ class LowRank:
     def prep(self, he, hq, deg):
         return he, hq, np.sum(he * hq, axis=1)   # cos is fixed; A, B are not
 
-    def _step(self, P, y, st, lr):
+    def _step(self, P, y, st, lr, grad_fn):
         he, hq, cos = P
         ea, qb = he @ self.A, hq @ self.B
-        _, ds = _loss_grad(cos + np.sum(ea * qb, axis=1) + self.b, y)
+        _, ds = grad_fn(cos + np.sum(ea * qb, axis=1) + self.b, y)
         _adam(self._params(),
               [he.T @ (ds[:, None] * qb), hq.T @ (ds[:, None] * ea),
                np.array([ds.sum()])], st, lr)
@@ -397,9 +293,9 @@ class MLP:
     def prep(self, he, hq, deg):
         return self._feat(he, hq, deg)
 
-    def _step(self, X, y, st, lr):
+    def _step(self, X, y, st, lr, grad_fn):
         h = np.maximum(0, X @ self.W1 + self.b1)
-        _, ds = _loss_grad((h @ self.W2 + self.b2).ravel(), y)
+        _, ds = grad_fn((h @ self.W2 + self.b2).ravel(), y)
         dh = (ds[:, None] @ self.W2.T) * (h > 0)
         _adam(self._params(),
               [X.T @ dh, dh.sum(0), h.T @ ds[:, None], np.array([ds.sum()])], st, lr)
@@ -489,22 +385,6 @@ def sample_from_pool(pool, pos, k, rng):
     return neg[:k].astype(np.int64)
 
 
-def roc_auc(scores, labels):
-    """Rank-based AUC. Ties get average rank, so a constant scorer gives 0.5."""
-    pos, neg = labels.sum(), len(labels) - labels.sum()
-    if pos == 0 or neg == 0:
-        return float("nan")
-    order = np.argsort(scores, kind="mergesort")
-    s_sorted = scores[order]
-    # Average rank within tied groups, vectorised: early stopping calls this once
-    # per eval per model, so a Python loop over every candidate dominates runtime.
-    _, inv, counts = np.unique(s_sorted, return_inverse=True, return_counts=True)
-    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
-    ranks = np.empty(len(scores), dtype=np.float64)
-    ranks[order] = (starts + (counts - 1) / 2.0 + 1)[inv]
-    return (ranks[labels == 1].sum() - pos * (pos + 1) / 2) / (pos * neg)
-
-
 def recall_at(scores, labels, k):
     top = np.argsort(-scores, kind="mergesort")[:k]
     return labels[top].sum() / labels.sum() if labels.sum() else float("nan")
@@ -512,7 +392,7 @@ def recall_at(scores, labels, k):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("dataset")
+    ap.add_argument("dataset", nargs="?")   # optional so --selftest runs alone
     ap.add_argument("--nodes", type=Path, default=None,
                     help="out/qafd_nodes_<dataset>.npz from export_qafd_nodes.sh")
     ap.add_argument("--train-questions", type=int, default=700)
@@ -556,9 +436,19 @@ def main():
     # entity_degree is a popularity feature, and the shuffle control shows
     # popularity is precisely the signal that survives permuting the labels. Zeroing
     # it asks whether the learned AUC gain was that nuisance all along.
+    # The gradients this script trains with now live in mbuzai/ranking.py; exposing
+    # its finite-difference check here means a refactor of either is caught from the
+    # script that depends on it, not only from the module.
+    ap.add_argument("--selftest", action="store_true",
+                    help="finite-difference the ranking objectives and exit")
     ap.add_argument("--no-degree", action="store_true",
                     help="zero the degree feature (MLP is the only model using it)")
     args = ap.parse_args()
+    if args.selftest:
+        from mbuzai import ranking
+        return ranking.selftest()
+    if not args.dataset:
+        ap.error("dataset is required (or pass --selftest)")
 
     npz_path = args.nodes or OUT / f"qafd_nodes_{args.dataset}.npz"
     if not npz_path.exists():
