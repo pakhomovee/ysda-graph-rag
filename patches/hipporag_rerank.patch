@@ -1,0 +1,349 @@
+diff --git a/main.py b/main.py
+index 9e20be7..84e6af8 100644
+--- a/main.py
++++ b/main.py
+@@ -67,18 +67,178 @@ def parse_args():
+     parser.add_argument("--force_openie_from_scratch", default="false", help="Regenerate stored OpenIE results")
+     parser.add_argument("--openie_mode", choices=["online", "offline"], default="online", help="OpenIE execution mode")
+     parser.add_argument("--save_dir", default="outputs", help="Save directory")
++
++    # ---- added: retrieval-only operation and a dump this repo can score ----
++    # Upstream always runs index() then rag_qa() and writes nothing keyed by question
++    # id, so there is no way to score a run against our gold without re-deriving the
++    # passage identity. These flags do not change retrieval; unset, behaviour is
++    # bit-for-bit upstream.
++    parser.add_argument("--data_dir", default=None,
++                        help="read <dataset>.json / <dataset>_corpus.json from here "
++                             "instead of reproduce/dataset. Point it at our data/ so "
++                             "the corpus is ours by construction and the retrieved-doc "
++                             "-> pid map is byte-for-byte identity")
++    parser.add_argument("--skip_qa", action="store_true",
++                        help="call retrieve() instead of rag_qa(); no reader, no LLM "
++                             "beyond the fact filter")
++    parser.add_argument("--dump", default=None,
++                        help="write {qid: [pid, ...]} here, pid indexing OUR corpus")
++    parser.add_argument("--num_queries", type=int, default=0,
++                        help="use only the first N questions (smoke runs)")
++    parser.add_argument("--query_shard", default=None,
++                        help="i/n — strided shard of the question set, so each shard "
++                             "sees the same mix of hop depths")
++
++    # ---- added: the fact-selection intervention ----
++    parser.add_argument("--rerank_mode", choices=["llm", "norerank", "learned"], default="llm",
++                        help="llm: their DSPyFilter (one LLM call per query). "
++                             "norerank: keep the candidate pool in embedding order. "
++                             "learned: a trained ranker from --rerank_model")
++    parser.add_argument("--rerank_model", default=None,
++                        help="npz for --rerank_mode learned (mbuzai.factmodel.FactScorer)")
++    parser.add_argument("--rerank_candidate_k", type=int, default=0,
++                        help="candidate facts handed to the reranker. Upstream this is "
++                             "linking_top_k (5), which is ALSO the survivor count and "
++                             "the seed-phrase count, so their filter can prune the "
++                             "embedding top-5 but never promote a fact ranked 6th. "
++                             "0 keeps the upstream coupling")
++    parser.add_argument("--rerank_keep_k", type=int, default=0,
++                        help="surviving facts (len_after_rerank). 0 keeps the upstream "
++                             "coupling to linking_top_k. Kept separate from the pool so "
++                             "'wider pool' and 'keep more' are different experiments")
++    parser.add_argument("--export_facts", default=None,
++                        help="write the (query, candidate facts, labels) npz for "
++                             "training a reranker, then exit before retrieval")
++    parser.add_argument("--export_pool_k", type=int, default=100,
++                        help="candidates per question in --export_facts")
+     return parser.parse_args()
+ 
+ 
++def _doc_strings(corpus):
++    """The passage identity used everywhere in this repo.
++
++    Upstream builds `docs` this way too, and mbuzai.dataio.Dataset.docs is the same
++    expression over the same file, so a retrieved doc string maps to our pid by plain
++    dict lookup. Anything that re-chunks or re-serialises breaks that into -1s.
++    """
++    return [f"{doc['title']}\n{doc['text']}" for doc in corpus]
++
++
++def export_facts(rag, queries, qids, gold_pids, path, pool_k):
++    """Dump the fact-selection decision for every question, for offline training.
++
++    Labels come from `rag.proc_triples_to_docs` (built in prepare_retrieval_objects):
++    processed-triple string -> the set of chunk ids it was extracted from. A candidate
++    fact is positive when any of its source chunks is a gold passage. That mapping is
++    the only thing that makes this trainable, so it is asserted non-empty rather than
++    silently producing an all-zero label column.
++
++    Raw dots are stored alongside the min-max score, with each query's global min/max,
++    so a shuffle control can recompute the score a RECIPIENT query would have given a
++    donor's candidate list. Reusing the donor's score there would leak the donor's
++    labels straight into the control and make it pass for the wrong reason.
++
++    Embeddings are stored AS THE STORE HOLDS THEM: HippoRAG's
++    TransformersEmbeddingModel.batch_encode drops its kwargs, so nothing in the index
++    is L2-normalised. Normalisation happens in exactly one place, in the feature
++    builder, rather than being half-applied here.
++    """
++    import numpy as np
++
++    rag.prepare_retrieval_objects()
++    if not getattr(rag, "proc_triples_to_docs", None):
++        raise SystemExit(
++            "\nFATAL: proc_triples_to_docs is empty — no fact can be traced to a source\n"
++            "  passage, so every label would be 0. The OpenIE results are missing or the\n"
++            "  index was built by a different code path."
++        )
++    chunk_key_to_pid = {k: rag._our_pid_of.get(
++        rag.chunk_embedding_store.get_row(k)["content"], -1) for k in rag.passage_node_keys}
++
++    # fact row -> source pids, resolved once. Coverage is reported because every label
++    # rests on it: if facts cannot be traced to passages, the labels are all zero and
++    # the training run would look merely unsuccessful rather than broken.
++    fact_src = []
++    n_traced = 0
++    for key in rag.fact_node_keys:
++        content = rag.fact_embedding_store.get_row(key)["content"]
++        srcs = {chunk_key_to_pid.get(c, -1) for c in rag.proc_triples_to_docs.get(content, ())}
++        srcs.discard(-1)
++        n_traced += bool(srcs)
++        fact_src.append(srcs)
++    cover = n_traced / max(len(fact_src), 1)
++    print(f"fact -> passage coverage: {n_traced}/{len(fact_src)} ({cover:.3f})")
++    if cover < 0.98:
++        raise SystemExit(
++            f"\nFATAL: only {cover:.1%} of facts trace back to a source passage.\n"
++            "  Labels built on that would be mostly false negatives. Check that the fact\n"
++            "  store content and proc_triples_to_docs keys are the same string form."
++        )
++
++    rag.get_query_embeddings(queries)
++    F = np.asarray(rag.fact_embeddings, dtype=np.float32)
++    n_q = len(queries)
++    cand_idx = np.full((n_q, pool_k), -1, dtype=np.int64)
++    cand_score = np.zeros((n_q, pool_k), dtype=np.float32)
++    cand_raw = np.zeros((n_q, pool_k), dtype=np.float32)
++    cand_nsrc = np.zeros((n_q, pool_k), dtype=np.int32)
++    label = np.zeros((n_q, pool_k), dtype=np.int8)
++    raw_min = np.zeros(n_q, dtype=np.float32)
++    raw_max = np.zeros(n_q, dtype=np.float32)
++    query_emb = np.zeros((n_q, F.shape[1]), dtype=np.float32)
++    ceiling = np.zeros(n_q, dtype=np.int8)
++
++    for i, query in enumerate(queries):
++        hq = np.asarray(rag.query_to_embedding["triple"][query], dtype=np.float32).ravel()
++        query_emb[i] = hq
++        raw = F @ hq
++        raw_min[i], raw_max[i] = float(raw.min()), float(raw.max())
++        take = min(pool_k, len(raw))
++        top = np.argsort(raw)[-take:][::-1]
++        span = (raw_max[i] - raw_min[i]) or 1.0
++        cand_idx[i, :take] = top
++        cand_raw[i, :take] = raw[top]
++        cand_score[i, :take] = (raw[top] - raw_min[i]) / span
++        gold = gold_pids[i]
++        for j, fi in enumerate(top):
++            srcs = fact_src[fi]
++            cand_nsrc[i, j] = len(srcs)
++            if srcs & gold:
++                label[i, j] = 1
++        ceiling[i] = int(label[i].any())
++
++    np.savez_compressed(
++        path,
++        qids=np.array(qids), query_emb=query_emb,
++        fact_emb=F, cand_idx=cand_idx, cand_score=cand_score, cand_raw=cand_raw,
++        cand_nsrc=cand_nsrc, label=label, raw_min=raw_min, raw_max=raw_max,
++    )
++    pos = int(label.sum())
++    print(f"wrote {path}: {n_q} questions x {pool_k} candidates, "
++          f"{pos} positives ({pos / max(n_q, 1):.1f} per question)")
++    # THE decisive number: no reranker can retrieve a gold-attested fact that is not in
++    # the pool, so this is the ceiling on every arm at this site, learned or LLM.
++    print(f"candidate ceiling @{pool_k}: {int(ceiling.sum())}/{n_q} "
++          f"({ceiling.mean():.3f}) questions have >=1 gold-attested fact in the pool")
++    for k in (5, 10, 25, 50):
++        if k < pool_k:
++            c = (label[:, :k].sum(1) > 0).mean()
++            print(f"  ceiling @{k:>3}: {c:.3f}")
++
++
+ def main():
+     args = parse_args()
+     save_dir = os.path.join(args.save_dir, args.dataset) if args.save_dir == "outputs" else f"{args.save_dir}_{args.dataset}"
+-    with open(f"reproduce/dataset/{args.dataset}_corpus.json") as file:
++    data_dir = args.data_dir or "reproduce/dataset"
++    with open(os.path.join(data_dir, f"{args.dataset}_corpus.json")) as file:
+         corpus = json.load(file)
+-    with open(f"reproduce/dataset/{args.dataset}.json") as file:
++    with open(os.path.join(data_dir, f"{args.dataset}.json")) as file:
+         samples = json.load(file)
+ 
+-    docs = [f"{doc['title']}\n{doc['text']}" for doc in corpus]
++    docs = _doc_strings(corpus)
++    doc_to_pid = {d: i for i, d in enumerate(docs)}
++    qids = [str(s.get("id") or s.get("_id") or s["question"]) for s in samples]
++
+     queries = [sample["question"] for sample in samples]
+     gold_answers = get_gold_answers(samples)
+     try:
+@@ -87,6 +247,20 @@ def main():
+         logging.warning("Retrieval evaluation is disabled because supporting documents are unavailable")
+         gold_docs = None
+ 
++    # Truncate before sharding, so --num_queries N --query_shard i/n means "shard i of
++    # the first N" rather than something that depends on evaluation order.
++    if args.num_queries > 0:
++        sl = slice(0, args.num_queries)
++        queries, qids, gold_answers = queries[sl], qids[sl], gold_answers[sl]
++        gold_docs = gold_docs[sl] if gold_docs is not None else None
++    if args.query_shard:
++        i, n = (int(x) for x in args.query_shard.split("/"))
++        if not (0 <= i < n):
++            raise SystemExit(f"--query_shard {args.query_shard}: need 0 <= i < n")
++        queries, qids, gold_answers = queries[i::n], qids[i::n], gold_answers[i::n]
++        gold_docs = gold_docs[i::n] if gold_docs is not None else None
++        print(f"  shard {i}/{n}: {len(queries)} questions")
++
+     config = BaseConfig(
+         save_dir=save_dir,
+         llm_base_url=args.llm_base_url,
+@@ -103,12 +277,64 @@ def main():
+         qa_top_k=5,
+         embedding_batch_size=args.embedding_batch_size,
+         openie_mode=args.openie_mode,
++        rerank_candidate_k=args.rerank_candidate_k or None,
++        rerank_keep_k=args.rerank_keep_k or None,
+     )
+     logging.basicConfig(level=logging.INFO)
+     rag_class = HippoRAG if args.rag_type == "hipporag" else StandardRAG
+     rag = rag_class(global_config=config)
+     rag.index(docs)
+-    rag.rag_qa(queries=queries, gold_docs=gold_docs, gold_answers=gold_answers)
++
++    # Corpus identity, resolved once and stashed for the exporter. Their chunk store
++    # holds the same strings `docs` was built from, so this is a lookup, not a match.
++    rag._our_pid_of = doc_to_pid
++
++    if args.rerank_mode != "llm":
++        if args.rag_type != "hipporag":
++            raise SystemExit("--rerank_mode only applies to --rag_type hipporag")
++        # Imported here, not at module scope, so the upstream path never depends on
++        # this repo being importable.
++        from mbuzai.factmodel import LearnedFilter, NoRerankFilter
++        if args.rerank_mode == "norerank":
++            rag.rerank_filter = NoRerankFilter()
++        else:
++            if not args.rerank_model:
++                raise SystemExit("--rerank_mode learned needs --rerank_model")
++            rag.rerank_filter = LearnedFilter.load(args.rerank_model, rag)
++        print(f"rerank_filter: {args.rerank_mode}"
++              + (f" from {args.rerank_model}" if args.rerank_model else ""))
++
++    if args.export_facts:
++        ds_gold = [set() for _ in queries]
++        if gold_docs is not None:
++            ds_gold = [{doc_to_pid[d] for d in g if d in doc_to_pid} for g in gold_docs]
++        export_facts(rag, queries, qids, ds_gold, args.export_facts, args.export_pool_k)
++        return
++
++    if not args.skip_qa:
++        rag.rag_qa(queries=queries, gold_docs=gold_docs, gold_answers=gold_answers)
++        return
++
++    out = rag.retrieve(queries=queries, gold_docs=gold_docs)
++    solutions, their_metrics = out if isinstance(out, tuple) else (out, None)
++    if their_metrics:
++        # Their own estimator over the same run. Reported alongside ours because two
++        # estimators agreeing is worth more than either alone.
++        print(f"their retrieval metrics: {their_metrics}")
++
++    if args.dump:
++        dump = {qid: [doc_to_pid.get(d, -1) for d in sol.docs]
++                for qid, sol in zip(qids, solutions)}
++        os.makedirs(os.path.dirname(os.path.abspath(args.dump)) or ".", exist_ok=True)
++        with open(args.dump, "w") as f:
++            json.dump(dump, f)
++        unmapped = sum(1 for v in dump.values() for i in v if i < 0)
++        # A query whose facts were all filtered away falls back to dense retrieval
++        # (HippoRAG.py:467). That is invisible in recall, so count it: an arm that
++        # silently became `dense` would otherwise look like a merely disappointing one.
++        no_seeds = sum(1 for sol in solutions if not sol.graph_seeds)
++        print(f"wrote {os.path.abspath(args.dump)}  ({len(dump)} questions, "
++              f"{unmapped} unmapped docs, {no_seeds} fell back to dense)")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/src/hipporag/HippoRAG.py b/src/hipporag/HippoRAG.py
+index ce1a155..97a75d7 100644
+--- a/src/hipporag/HippoRAG.py
++++ b/src/hipporag/HippoRAG.py
+@@ -1672,6 +1672,13 @@ class HippoRAG:
+         """
+         # load args
+         link_top_k: int = self.global_config.linking_top_k
++        # Upstream slices the candidate pool at link_top_k and also passes it as
++        # len_after_rerank, so the filter can only prune the embedding top-5 -- it can
++        # never promote a fact ranked 6th. That is an LLM-cost bottleneck (you cannot
++        # cheaply ask an LLM to rank 100 triples), not a property of the site. Both
++        # default to link_top_k, so an unset config is bitwise upstream.
++        cand_k: int = getattr(self.global_config, "rerank_candidate_k", None) or link_top_k
++        keep_k: int = getattr(self.global_config, "rerank_keep_k", None) or link_top_k
+         
+         # Check if there are any facts to rerank
+         if len(query_fact_scores) == 0 or len(self.fact_node_keys) == 0:
+@@ -1680,23 +1687,30 @@ class HippoRAG:
+             
+         try:
+             # Get the top k facts by score
+-            if len(query_fact_scores) <= link_top_k:
++            if len(query_fact_scores) <= cand_k:
+                 # If we have fewer facts than requested, use all of them
+                 candidate_fact_indices = np.argsort(query_fact_scores)[::-1].tolist()
+             else:
+                 # Otherwise get the top k
+-                candidate_fact_indices = np.argsort(query_fact_scores)[-link_top_k:][::-1].tolist()
++                candidate_fact_indices = np.argsort(query_fact_scores)[-cand_k:][::-1].tolist()
+                 
+             # Get the actual fact IDs
+             real_candidate_fact_ids = [self.fact_node_keys[idx] for idx in candidate_fact_indices]
+             fact_row_dict = self.fact_embedding_store.get_rows(real_candidate_fact_ids)
+             candidate_facts = [eval(fact_row_dict[id]['content']) for id in real_candidate_fact_ids]
+             
++            # rerank() is handed no scores, and a learned filter must see the SAME
++            # number the model trained on. Recomputing it inside the filter would need
++            # the global min/max over all facts; a within-list min-max would be a
++            # different quantity, which is the silent train/inference feature
++            # disagreement mbuzai/edgemodel.py exists to prevent.
++            self._last_fact_scores = query_fact_scores
++
+             # Rerank the facts
+             top_k_fact_indices, top_k_facts, reranker_dict = self.rerank_filter(query,
+                                                                                 candidate_facts,
+                                                                                 candidate_fact_indices,
+-                                                                                len_after_rerank=link_top_k)
++                                                                                len_after_rerank=keep_k)
+             
+             rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
+             
+diff --git a/src/hipporag/utils/config_utils.py b/src/hipporag/utils/config_utils.py
+index 6f4628a..aca030f 100644
+--- a/src/hipporag/utils/config_utils.py
++++ b/src/hipporag/utils/config_utils.py
+@@ -189,6 +189,19 @@ class BaseConfig:
+         default=200,
+         metadata={"help": "Retrieving k documents at each step"}
+     )
++    # linking_top_k is three things at once upstream: the candidate pool handed to
++    # rerank_filter, the survivor count, and the phrase budget in
++    # graph_search_with_fact_entities. Moving it moves all three and the result is
++    # uninterpretable. These split the first two off; None keeps the coupling, so an
++    # unset config is bitwise upstream.
++    rerank_candidate_k: Optional[int] = field(
++        default=None,
++        metadata={"help": "Candidate facts handed to rerank_filter. None -> linking_top_k"}
++    )
++    rerank_keep_k: Optional[int] = field(
++        default=None,
++        metadata={"help": "len_after_rerank, i.e. surviving facts. None -> linking_top_k"}
++    )
+     damping: float = field(
+         default=0.5,
+         metadata={"help": "Damping factor for ppr algorithm."}

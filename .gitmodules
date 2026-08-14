@@ -6,3 +6,7 @@
 	path = third_party/QAFD-RAG
 	url = https://github.com/Tarzanagh/QAFD-RAG
 	ignore = dirty
+[submodule "third_party/HippoRAG"]
+	path = third_party/HippoRAG
+	url = https://github.com/OSU-NLP-Group/HippoRAG
+	ignore = dirty

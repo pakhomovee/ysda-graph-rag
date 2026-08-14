@@ -15,3 +15,6 @@ out/*_rerank.json
 out/qafd_oracle_*.json
 out/edgestats_*.json
 out/scored_qafd_*.json
+out/hipporag_*
+out/ppr_musique_*.json
+out/pprstats_*.json
