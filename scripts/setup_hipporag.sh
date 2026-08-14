@@ -73,8 +73,13 @@ else
     echo "    FATAL: main.py --help failed:" >&2; printf '%s\n' "$_help" | tail -5 >&2
     exit 1
 fi
+# Every flag the runbook uses. A stale patch that still has the OLD flags would
+# otherwise pass this gate and then die on argparse (exit 2) at launch, which is
+# exactly what it happened to miss once.
 for flag in --skip_qa --data_dir --dump --rerank_mode --rerank_candidate_k \
-            --rerank_keep_k --export_facts --num_queries --query_shard; do
+            --rerank_keep_k --export_facts --num_queries --query_shard \
+            --openie_max_workers --embedding_max_seq_len --max_new_tokens \
+            --reasoning_effort; do
     case "$_help" in
         *"$flag"*) echo "    ok: $flag" ;;
         *) cat >&2 <<EOF
