@@ -1,8 +1,18 @@
 diff --git a/main.py b/main.py
-index 9e20be7..84e6af8 100644
+index 9e20be7..2a13251 100644
 --- a/main.py
 +++ b/main.py
-@@ -67,18 +67,178 @@ def parse_args():
+@@ -62,23 +62,192 @@ def parse_args():
+     parser.add_argument("--embedding_name", default="nvidia/NV-Embed-v2", help="Embedding model name")
+     parser.add_argument("--azure_endpoint", help="Azure OpenAI chat completions endpoint")
+     parser.add_argument("--azure_embedding_endpoint", help="Azure OpenAI embeddings endpoint")
+-    parser.add_argument("--embedding_batch_size", type=int, default=8, help="Embedding batch size")
++    parser.add_argument("--embedding_batch_size", type=int, default=8,
++                        help="Embedding batch size. Their default of 8 is well under "
++                             "BaseConfig's own 16 and far under what an A100 holds for "
++                             "the short entity/fact strings that dominate the corpus; "
++                             "64-128 is the single biggest indexing speedup")
+     parser.add_argument("--force_index_from_scratch", default="false", help="Rebuild all stored index and graph data")
      parser.add_argument("--force_openie_from_scratch", default="false", help="Regenerate stored OpenIE results")
      parser.add_argument("--openie_mode", choices=["online", "offline"], default="online", help="OpenIE execution mode")
      parser.add_argument("--save_dir", default="outputs", help="Save directory")
@@ -48,6 +58,11 @@ index 9e20be7..84e6af8 100644
 +    parser.add_argument("--export_facts", default=None,
 +                        help="write the (query, candidate facts, labels) npz for "
 +                             "training a reranker, then exit before retrieval")
++    parser.add_argument("--openie_max_workers", type=int, default=0,
++                        help="OpenIE client concurrency. 0 keeps ThreadPoolExecutor's "
++                             "min(32, cpu+4), which is a throughput ceiling: the "
++                             "threads wait on vLLM rather than compute, so a server "
++                             "that could run 256 sequences still sees only 32")
 +    parser.add_argument("--export_pool_k", type=int, default=100,
 +                        help="candidates per question in --export_facts")
      return parser.parse_args()
@@ -184,7 +199,7 @@ index 9e20be7..84e6af8 100644
      queries = [sample["question"] for sample in samples]
      gold_answers = get_gold_answers(samples)
      try:
-@@ -87,6 +247,20 @@ def main():
+@@ -87,6 +256,20 @@ def main():
          logging.warning("Retrieval evaluation is disabled because supporting documents are unavailable")
          gold_docs = None
  
@@ -205,10 +220,11 @@ index 9e20be7..84e6af8 100644
      config = BaseConfig(
          save_dir=save_dir,
          llm_base_url=args.llm_base_url,
-@@ -103,12 +277,64 @@ def main():
+@@ -103,12 +286,65 @@ def main():
          qa_top_k=5,
          embedding_batch_size=args.embedding_batch_size,
          openie_mode=args.openie_mode,
++        openie_max_workers=args.openie_max_workers or None,
 +        rerank_candidate_k=args.rerank_candidate_k or None,
 +        rerank_keep_k=args.rerank_keep_k or None,
      )
@@ -323,11 +339,51 @@ index ce1a155..97a75d7 100644
              
              rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
              
+diff --git a/src/hipporag/information_extraction/openie_openai.py b/src/hipporag/information_extraction/openie_openai.py
+index 8490b3b..726e656 100644
+--- a/src/hipporag/information_extraction/openie_openai.py
++++ b/src/hipporag/information_extraction/openie_openai.py
+@@ -3,6 +3,17 @@ import re
+ from dataclasses import dataclass
+ from typing import Dict, Any, List, TypedDict, Tuple
+ from concurrent.futures import ThreadPoolExecutor, as_completed
++
++
++def _openie_workers(self):
++    """Client-side concurrency for OpenIE.
++
++    These are network-bound threads waiting on vLLM, not compute, so the
++    interpreter default of min(32, cpu+4) is a throughput ceiling rather
++    than a safety limit: a server that could serve 256 concurrent
++    sequences still only ever sees 32.
++    """
++    return getattr(self.global_config, 'openie_max_workers', None) or None
+ from tqdm import tqdm
+ 
+ from ..prompts import PromptTemplateManager
+@@ -154,7 +165,7 @@ class OpenIE:
+         total_completion_tokens = 0
+         num_cache_hit = 0
+ 
+-        with ThreadPoolExecutor() as executor:
++        with ThreadPoolExecutor(max_workers=_openie_workers(self)) as executor:
+             # Create NER futures for each chunk
+             ner_futures = {
+                 executor.submit(self.ner, chunk_key, passage): chunk_key
+@@ -180,7 +191,7 @@ class OpenIE:
+ 
+         triple_results_list = []
+         total_prompt_tokens, total_completion_tokens, num_cache_hit = 0, 0, 0
+-        with ThreadPoolExecutor() as executor:
++        with ThreadPoolExecutor(max_workers=_openie_workers(self)) as executor:
+             # Create triple extraction futures for each chunk
+             re_futures = {
+                 executor.submit(self.triple_extraction, ner_result.chunk_id,
 diff --git a/src/hipporag/utils/config_utils.py b/src/hipporag/utils/config_utils.py
-index 6f4628a..aca030f 100644
+index 6f4628a..388212e 100644
 --- a/src/hipporag/utils/config_utils.py
 +++ b/src/hipporag/utils/config_utils.py
-@@ -189,6 +189,19 @@ class BaseConfig:
+@@ -189,6 +189,25 @@ class BaseConfig:
          default=200,
          metadata={"help": "Retrieving k documents at each step"}
      )
@@ -336,6 +392,12 @@ index 6f4628a..aca030f 100644
 +    # graph_search_with_fact_entities. Moving it moves all three and the result is
 +    # uninterpretable. These split the first two off; None keeps the coupling, so an
 +    # unset config is bitwise upstream.
++    openie_max_workers: Optional[int] = field(
++        default=None,
++        metadata={"help": "OpenIE client concurrency. None -> ThreadPoolExecutor's "
++                          "default of min(32, cpu+4), which caps how hard the client "
++                          "can push a vLLM server however many GPUs it has"}
++    )
 +    rerank_candidate_k: Optional[int] = field(
 +        default=None,
 +        metadata={"help": "Candidate facts handed to rerank_filter. None -> linking_top_k"}

@@ -12,8 +12,16 @@
 # QAFD's mpnet encoder, for instance.
 set -euo pipefail
 
-DEVICE=${DEVICE:-3}
+DEVICE=${DEVICE:-3}          # one id, or a comma list for tensor parallelism
 PORT=${PORT:-5679}
+# OpenIE is ~23k generations (NER + triples over 11.7k passages) and is the long pole
+# of a HippoRAG index. Two levers:
+#   DEVICE=0,1  tensor parallelism across those cards. The count must divide the
+#               attention heads, so 1/2/4 -- never 3.
+#   MAXSEQS     concurrent sequences vLLM will batch. The default is conservative;
+#               raising it only helps if the CLIENT is also concurrent, which for
+#               HippoRAG means main.py --openie_max_workers.
+MAXSEQS=${MAXSEQS:-}
 MODEL=${MODEL:-openai/gpt-oss-20b}
 # The id the server answers to. QAFD derives working_dir from llm_model, so to
 # run against the authors' prebuilt KG (kg/multihop/<llm>_<emb>_<dataset>) the
@@ -24,14 +32,17 @@ RESERVE_MIB=${RESERVE_MIB:-3000}   # headroom for a co-resident encoder
 WEIGHTS_MIB=${WEIGHTS_MIB:-14000}  # gpt-oss-20b MXFP4 weights, with slack
 MAXLEN=${MAXLEN:-8192}
 
+# With several cards, size the budget from the TIGHTEST of them: vLLM applies one
+# utilisation fraction to every rank, so the smallest free block is what fits.
+_TP=$(awk -F, '{print NF}' <<<"$DEVICE")
 read -r FREE TOTAL < <(nvidia-smi --query-gpu=memory.free,memory.total \
-    --format=csv,noheader,nounits -i "$DEVICE" | tr -d ',')
+    --format=csv,noheader,nounits -i "$DEVICE" | tr -d ',' | sort -n | head -1)
 
 USABLE=$(( FREE - RESERVE_MIB ))
 UTIL=$(awk -v u="$USABLE" -v t="$TOTAL" 'BEGIN{ printf "%.3f", (u>0? u/t : 0) }')
 BUDGET=$(awk -v uu="$UTIL" -v t="$TOTAL" 'BEGIN{ printf "%d", uu*t }')
 
-echo "GPU $DEVICE: ${FREE} MiB free of ${TOTAL}"
+echo "GPU $DEVICE: ${FREE} MiB free of ${TOTAL} (tensor-parallel ${_TP})"
 echo "  reserving ${RESERVE_MIB} MiB for a co-resident encoder"
 echo "  --gpu-memory-utilization ${UTIL}  -> ${BUDGET} MiB budget"
 
@@ -60,4 +71,6 @@ CUDA_VISIBLE_DEVICES="$DEVICE" vllm serve "$MODEL" \
     --served-model-name "$SERVED_NAME" \
     --port "$PORT" \
     --gpu-memory-utilization "$UTIL" \
+    --tensor-parallel-size "$_TP" \
+    ${MAXSEQS:+--max-num-seqs "$MAXSEQS"} \
     --max-model-len "$MAXLEN"
