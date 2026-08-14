@@ -1,8 +1,8 @@
 diff --git a/main.py b/main.py
-index 9e20be7..97e3e10 100644
+index 9e20be7..2183735 100644
 --- a/main.py
 +++ b/main.py
-@@ -62,23 +62,211 @@ def parse_args():
+@@ -62,23 +62,221 @@ def parse_args():
      parser.add_argument("--embedding_name", default="nvidia/NV-Embed-v2", help="Embedding model name")
      parser.add_argument("--azure_endpoint", help="Azure OpenAI chat completions endpoint")
      parser.add_argument("--azure_embedding_endpoint", help="Azure OpenAI embeddings endpoint")
@@ -65,6 +65,16 @@ index 9e20be7..97e3e10 100644
 +                             "the 11.7k passages are ~150. Capping it lets one batch "
 +                             "size serve both workloads instead of the long texts "
 +                             "dictating a small batch for everything. 0 keeps 2048")
++    # ---- cloud inference regime ----
++    parser.add_argument("--llm_auth_scheme", default="bearer", choices=["bearer", "api-key"],
++                        help="how the API key is sent. bearer = OpenAI SDK default; "
++                             "api-key = Yandex Cloud AI Studio's Api-Key header")
++    parser.add_argument("--price_in_per_1k", type=float, default=0.0,
++                        help="price per 1000 input tokens, for the end-of-run cost "
++                             "report (Yandex gpt-oss-120b: 0.3, 20b: 0.1)")
++    parser.add_argument("--price_out_per_1k", type=float, default=0.0,
++                        help="price per 1000 output tokens; flat-rate models use the "
++                             "same value as --price_in_per_1k")
 +    parser.add_argument("--reasoning_effort", default="low",
 +                        help="sent as extra_body.reasoning_effort. gpt-oss otherwise "
 +                             "spends ~3000 tokens per extraction reasoning and never "
@@ -218,7 +228,7 @@ index 9e20be7..97e3e10 100644
      queries = [sample["question"] for sample in samples]
      gold_answers = get_gold_answers(samples)
      try:
-@@ -87,6 +275,20 @@ def main():
+@@ -87,6 +285,20 @@ def main():
          logging.warning("Retrieval evaluation is disabled because supporting documents are unavailable")
          gold_docs = None
  
@@ -239,13 +249,16 @@ index 9e20be7..97e3e10 100644
      config = BaseConfig(
          save_dir=save_dir,
          llm_base_url=args.llm_base_url,
-@@ -103,12 +305,73 @@ def main():
+@@ -103,12 +315,82 @@ def main():
          qa_top_k=5,
          embedding_batch_size=args.embedding_batch_size,
          openie_mode=args.openie_mode,
 +        embedding_max_seq_len=args.embedding_max_seq_len or 2048,
 +        max_new_tokens=args.max_new_tokens or 2048,
 +        reasoning_effort=args.reasoning_effort or None,
++        llm_auth_scheme=args.llm_auth_scheme,
++        price_in_per_1k=args.price_in_per_1k,
++        price_out_per_1k=args.price_out_per_1k,
 +        openie_max_workers=args.openie_max_workers or None,
 +        rerank_candidate_k=args.rerank_candidate_k or None,
 +        rerank_keep_k=args.rerank_keep_k or None,
@@ -260,6 +273,12 @@ index 9e20be7..97e3e10 100644
      rag = rag_class(global_config=config)
      rag.index(docs)
 -    rag.rag_qa(queries=queries, gold_docs=gold_docs, gold_answers=gold_answers)
++
++    _llm = getattr(rag, "llm_model", None)
++    if _llm is not None and getattr(_llm, "total_prompt_tokens", 0):
++        from src.hipporag.llm.openai_gpt import format_cost
++        print("indexing " + format_cost(_llm.total_prompt_tokens, _llm.total_completion_tokens,
++                                        args.price_in_per_1k, args.price_out_per_1k))
 +
 +    # Corpus identity, resolved once and stashed for the exporter. Their chunk store
 +    # holds the same strings `docs` was built from, so this is a lookup, not a match.
@@ -410,10 +429,10 @@ index 8490b3b..47b64d0 100644
              re_futures = {
                  executor.submit(self.triple_extraction, ner_result.chunk_id,
 diff --git a/src/hipporag/llm/openai_gpt.py b/src/hipporag/llm/openai_gpt.py
-index f4ae0ba..84ce583 100644
+index f4ae0ba..2fb55cc 100644
 --- a/src/hipporag/llm/openai_gpt.py
 +++ b/src/hipporag/llm/openai_gpt.py
-@@ -110,6 +110,29 @@ def dynamic_retry_decorator(func):
+@@ -110,6 +110,40 @@ def dynamic_retry_decorator(func):
          return decorated_func(self, *args, **kwargs)
      return wrapper
  
@@ -440,10 +459,48 @@ index f4ae0ba..84ce583 100644
 +    return None, None
 +
 +
++def format_cost(prompt_tokens, completion_tokens, price_in_per_1k, price_out_per_1k):
++    """One line of spend, or a token count when no prices are configured."""
++    total = prompt_tokens + completion_tokens
++    if not (price_in_per_1k or price_out_per_1k):
++        return (f"tokens: {prompt_tokens:,} in + {completion_tokens:,} out = "
++                f"{total:,} (no prices configured)")
++    cost = prompt_tokens / 1000 * price_in_per_1k + completion_tokens / 1000 * price_out_per_1k
++    return (f"tokens: {prompt_tokens:,} in + {completion_tokens:,} out = {total:,}; "
++            f"cost: {cost:,.2f} at {price_in_per_1k}/{price_out_per_1k} per 1k")
++
++
  class CacheOpenAI(BaseLLM):
      """OpenAI LLM implementation."""
      @classmethod
-@@ -174,6 +197,18 @@ class CacheOpenAI(BaseLLM):
+@@ -142,8 +176,25 @@ class CacheOpenAI(BaseLLM):
+ 
+         self.max_retries = kwargs.get("max_retries", 2)
+ 
++        # Cloud endpoints do not all speak Bearer. Yandex Cloud AI Studio wants
++        # "Authorization: Api-Key <key>", and sending Bearer there is a 401 on every
++        # call -- which the retry decorator converts into a slow, confusing failure
++        # rather than an immediate one.
++        _headers = None
++        if str(getattr(self.global_config, "llm_auth_scheme", "bearer")).lower() == "api-key":
++            _key = os.getenv("OPENAI_API_KEY") or ""
++            _headers = {"Authorization": f"Api-Key {_key}"}
++
++        # Cumulative usage, for the cost report. The OpenIE progress bars show per-phase
++        # totals and then discard them; a run that costs real money should say so once,
++        # at the end, in currency.
++        self.total_prompt_tokens = 0
++        self.total_completion_tokens = 0
++
+         if self.global_config.azure_endpoint is None:
+-            self.openai_client = OpenAI(base_url=self.llm_base_url, http_client=client, max_retries=self.max_retries)
++            self.openai_client = OpenAI(base_url=self.llm_base_url, http_client=client,
++                                        max_retries=self.max_retries,
++                                        default_headers=_headers)
+         else:
+             self.openai_client = AzureOpenAI(api_version=self.global_config.azure_endpoint.split('api-version=')[1],
+                                              azure_endpoint=self.global_config.azure_endpoint, max_retries=self.max_retries)
+@@ -174,6 +225,18 @@ class CacheOpenAI(BaseLLM):
          params = deepcopy(self.llm_config.generate_params)
          if kwargs:
              params.update(kwargs)
@@ -462,7 +519,7 @@ index f4ae0ba..84ce583 100644
          params["messages"] = messages
          logger.debug(f"Calling OpenAI GPT API with:\n{params}")
  
-@@ -183,7 +218,25 @@ class CacheOpenAI(BaseLLM):
+@@ -183,7 +246,25 @@ class CacheOpenAI(BaseLLM):
  
          response = self.openai_client.chat.completions.create(**params)
  
@@ -489,11 +546,22 @@ index f4ae0ba..84ce583 100644
          assert isinstance(response_message, str), "response_message should be a string"
          
          metadata = {
+@@ -191,6 +272,10 @@ class CacheOpenAI(BaseLLM):
+             "completion_tokens": response.usage.completion_tokens,
+             "finish_reason": response.choices[0].finish_reason,
+         }
++        # Threads race here; the count is for a cost estimate, not accounting, and a
++        # lock per call would cost more than the number is worth.
++        self.total_prompt_tokens += response.usage.prompt_tokens
++        self.total_completion_tokens += response.usage.completion_tokens
+ 
+         return response_message, metadata
+ 
 diff --git a/src/hipporag/utils/config_utils.py b/src/hipporag/utils/config_utils.py
-index 6f4628a..ea662d3 100644
+index 6f4628a..c0f17e1 100644
 --- a/src/hipporag/utils/config_utils.py
 +++ b/src/hipporag/utils/config_utils.py
-@@ -189,6 +189,31 @@ class BaseConfig:
+@@ -189,6 +189,49 @@ class BaseConfig:
          default=200,
          metadata={"help": "Retrieving k documents at each step"}
      )
@@ -502,6 +570,24 @@ index 6f4628a..ea662d3 100644
 +    # graph_search_with_fact_entities. Moving it moves all three and the result is
 +    # uninterpretable. These split the first two off; None keeps the coupling, so an
 +    # unset config is bitwise upstream.
++    llm_auth_scheme: str = field(
++        default="bearer",
++        metadata={"help": "How the API key is sent. 'bearer' is what the OpenAI SDK "
++                          "does; 'api-key' is Yandex Cloud AI Studio's "
++                          "'Authorization: Api-Key <key>'. Getting this wrong is a 401 "
++                          "on every call, which the retry decorator turns into a slow "
++                          "failure rather than an obvious one"}
++    )
++    price_in_per_1k: float = field(
++        default=0.0,
++        metadata={"help": "Price per 1000 input tokens, for the cost report. Yandex "
++                          "gpt-oss-120b is 0.3, gpt-oss-20b 0.1 (rubles, incl. VAT)"}
++    )
++    price_out_per_1k: float = field(
++        default=0.0,
++        metadata={"help": "Price per 1000 output tokens. Flat-rate models use the same "
++                          "number as price_in_per_1k"}
++    )
 +    reasoning_effort: Optional[str] = field(
 +        default=None,
 +        metadata={"help": "Sent as extra_body.reasoning_effort for harmony-format "
