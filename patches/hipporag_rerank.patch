@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index 9e20be7..7747f94 100644
+index 9e20be7..ae0c795 100644
 --- a/main.py
 +++ b/main.py
 @@ -62,23 +62,199 @@ def parse_args():
@@ -227,7 +227,7 @@ index 9e20be7..7747f94 100644
      config = BaseConfig(
          save_dir=save_dir,
          llm_base_url=args.llm_base_url,
-@@ -103,12 +293,66 @@ def main():
+@@ -103,12 +293,71 @@ def main():
          qa_top_k=5,
          embedding_batch_size=args.embedding_batch_size,
          openie_mode=args.openie_mode,
@@ -237,6 +237,11 @@ index 9e20be7..7747f94 100644
 +        rerank_keep_k=args.rerank_keep_k or None,
      )
      logging.basicConfig(level=logging.INFO)
++    # httpx logs one INFO line per request, and OpenIE makes ~23k of them, so a real
++    # traceback ends up buried under tens of thousands of "HTTP/1.1 200 OK". Their own
++    # progress bars carry the same information usefully.
++    logging.getLogger("httpx").setLevel(logging.WARNING)
++    logging.getLogger("httpcore").setLevel(logging.WARNING)
      rag_class = HippoRAG if args.rag_type == "hipporag" else StandardRAG
      rag = rag_class(global_config=config)
      rag.index(docs)
