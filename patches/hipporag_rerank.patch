@@ -1,8 +1,8 @@
 diff --git a/main.py b/main.py
-index 9e20be7..60ce7e8 100644
+index 9e20be7..97e3e10 100644
 --- a/main.py
 +++ b/main.py
-@@ -62,23 +62,206 @@ def parse_args():
+@@ -62,23 +62,211 @@ def parse_args():
      parser.add_argument("--embedding_name", default="nvidia/NV-Embed-v2", help="Embedding model name")
      parser.add_argument("--azure_endpoint", help="Azure OpenAI chat completions endpoint")
      parser.add_argument("--azure_embedding_endpoint", help="Azure OpenAI embeddings endpoint")
@@ -65,6 +65,11 @@ index 9e20be7..60ce7e8 100644
 +                             "the 11.7k passages are ~150. Capping it lets one batch "
 +                             "size serve both workloads instead of the long texts "
 +                             "dictating a small batch for everything. 0 keeps 2048")
++    parser.add_argument("--reasoning_effort", default="low",
++                        help="sent as extra_body.reasoning_effort. gpt-oss otherwise "
++                             "spends ~3000 tokens per extraction reasoning and never "
++                             "reaches the answer channel; 'low' measured at 40. Pass "
++                             "an empty string to leave the request untouched")
 +    parser.add_argument("--max_new_tokens", type=int, default=0,
 +                        help="completion budget per LLM call. BaseConfig's 2048 is "
 +                             "spent entirely on the reasoning channel by gpt-oss, so "
@@ -213,7 +218,7 @@ index 9e20be7..60ce7e8 100644
      queries = [sample["question"] for sample in samples]
      gold_answers = get_gold_answers(samples)
      try:
-@@ -87,6 +270,20 @@ def main():
+@@ -87,6 +275,20 @@ def main():
          logging.warning("Retrieval evaluation is disabled because supporting documents are unavailable")
          gold_docs = None
  
@@ -234,12 +239,13 @@ index 9e20be7..60ce7e8 100644
      config = BaseConfig(
          save_dir=save_dir,
          llm_base_url=args.llm_base_url,
-@@ -103,12 +300,72 @@ def main():
+@@ -103,12 +305,73 @@ def main():
          qa_top_k=5,
          embedding_batch_size=args.embedding_batch_size,
          openie_mode=args.openie_mode,
 +        embedding_max_seq_len=args.embedding_max_seq_len or 2048,
 +        max_new_tokens=args.max_new_tokens or 2048,
++        reasoning_effort=args.reasoning_effort or None,
 +        openie_max_workers=args.openie_max_workers or None,
 +        rerank_candidate_k=args.rerank_candidate_k or None,
 +        rerank_keep_k=args.rerank_keep_k or None,
@@ -404,10 +410,10 @@ index 8490b3b..47b64d0 100644
              re_futures = {
                  executor.submit(self.triple_extraction, ner_result.chunk_id,
 diff --git a/src/hipporag/llm/openai_gpt.py b/src/hipporag/llm/openai_gpt.py
-index f4ae0ba..4abb404 100644
+index f4ae0ba..84ce583 100644
 --- a/src/hipporag/llm/openai_gpt.py
 +++ b/src/hipporag/llm/openai_gpt.py
-@@ -110,6 +110,41 @@ def dynamic_retry_decorator(func):
+@@ -110,6 +110,29 @@ def dynamic_retry_decorator(func):
          return decorated_func(self, *args, **kwargs)
      return wrapper
  
@@ -434,36 +440,29 @@ index f4ae0ba..4abb404 100644
 +    return None, None
 +
 +
-+def _reasoning_low(messages):
-+    """Prepend a low-reasoning directive to the system turn, copying rather than
-+    mutating: `messages` is built once per chunk and reused by the retry decorator."""
-+    out = [dict(m) for m in messages]
-+    for m in out:
-+        if m.get("role") == "system":
-+            if not str(m.get("content", "")).startswith("Reasoning:"):
-+                m["content"] = "Reasoning: low\n" + str(m.get("content", ""))
-+            return out
-+    return [{"role": "system", "content": "Reasoning: low"}] + out
-+
-+
  class CacheOpenAI(BaseLLM):
      """OpenAI LLM implementation."""
      @classmethod
-@@ -174,6 +209,13 @@ class CacheOpenAI(BaseLLM):
+@@ -174,6 +197,18 @@ class CacheOpenAI(BaseLLM):
          params = deepcopy(self.llm_config.generate_params)
          if kwargs:
              params.update(kwargs)
-+        if "gpt-oss" in str(params.get("model", "")).lower():
-+            # Cause, not symptom: gpt-oss reasons in a separate channel and will spend
-+            # the whole completion budget there on an extraction prompt, leaving the
-+            # answer channel empty. "Reasoning: low" keeps the analysis short enough
-+            # that the final channel is reached. Same workaround the QAFD runner in
-+            # this repo applies for the same model.
-+            messages = _reasoning_low(messages)
++        _effort = getattr(self.global_config, "reasoning_effort", None)
++        if _effort:
++            # gpt-oss reasons in a separate channel and will spend the whole completion
++            # budget there on an extraction prompt, leaving the answer channel empty.
++            # A "Reasoning: low" hint in the system prompt does NOT suppress it on
++            # vLLM; this request parameter does -- measured at 40 generated tokens
++            # against ~3000. Sent via extra_body so it reaches servers whose schema the
++            # installed SDK does not model, and it leaves their DSPy-tuned prompts
++            # untouched, which a system-prompt edit would not.
++            _extra = dict(params.get("extra_body") or {})
++            _extra.setdefault("reasoning_effort", _effort)
++            params["extra_body"] = _extra
          params["messages"] = messages
          logger.debug(f"Calling OpenAI GPT API with:\n{params}")
  
-@@ -183,7 +225,25 @@ class CacheOpenAI(BaseLLM):
+@@ -183,7 +218,25 @@ class CacheOpenAI(BaseLLM):
  
          response = self.openai_client.chat.completions.create(**params)
  
@@ -491,10 +490,10 @@ index f4ae0ba..4abb404 100644
          
          metadata = {
 diff --git a/src/hipporag/utils/config_utils.py b/src/hipporag/utils/config_utils.py
-index 6f4628a..388212e 100644
+index 6f4628a..ea662d3 100644
 --- a/src/hipporag/utils/config_utils.py
 +++ b/src/hipporag/utils/config_utils.py
-@@ -189,6 +189,25 @@ class BaseConfig:
+@@ -189,6 +189,31 @@ class BaseConfig:
          default=200,
          metadata={"help": "Retrieving k documents at each step"}
      )
@@ -503,6 +502,12 @@ index 6f4628a..388212e 100644
 +    # graph_search_with_fact_entities. Moving it moves all three and the result is
 +    # uninterpretable. These split the first two off; None keeps the coupling, so an
 +    # unset config is bitwise upstream.
++    reasoning_effort: Optional[str] = field(
++        default=None,
++        metadata={"help": "Sent as extra_body.reasoning_effort for harmony-format "
++                          "models (gpt-oss). 'low' cuts an extraction call from ~3000 "
++                          "generated tokens to ~40. None leaves the request untouched"}
++    )
 +    openie_max_workers: Optional[int] = field(
 +        default=None,
 +        metadata={"help": "OpenIE client concurrency. None -> ThreadPoolExecutor's "
