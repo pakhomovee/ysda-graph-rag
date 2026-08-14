@@ -392,6 +392,69 @@ index 8490b3b..726e656 100644
              # Create triple extraction futures for each chunk
              re_futures = {
                  executor.submit(self.triple_extraction, ner_result.chunk_id,
+diff --git a/src/hipporag/llm/openai_gpt.py b/src/hipporag/llm/openai_gpt.py
+index f4ae0ba..1a28929 100644
+--- a/src/hipporag/llm/openai_gpt.py
++++ b/src/hipporag/llm/openai_gpt.py
+@@ -110,6 +110,18 @@ def dynamic_retry_decorator(func):
+         return decorated_func(self, *args, **kwargs)
+     return wrapper
+ 
++def _reasoning_low(messages):
++    """Prepend a low-reasoning directive to the system turn, copying rather than
++    mutating: `messages` is built once per chunk and reused by the retry decorator."""
++    out = [dict(m) for m in messages]
++    for m in out:
++        if m.get("role") == "system":
++            if not str(m.get("content", "")).startswith("Reasoning:"):
++                m["content"] = "Reasoning: low\n" + str(m.get("content", ""))
++            return out
++    return [{"role": "system", "content": "Reasoning: low"}] + out
++
++
+ class CacheOpenAI(BaseLLM):
+     """OpenAI LLM implementation."""
+     @classmethod
+@@ -174,6 +186,13 @@ class CacheOpenAI(BaseLLM):
+         params = deepcopy(self.llm_config.generate_params)
+         if kwargs:
+             params.update(kwargs)
++        if "gpt-oss" in str(params.get("model", "")).lower():
++            # Cause, not symptom: gpt-oss reasons in a separate channel and will spend
++            # the whole completion budget there on an extraction prompt, leaving the
++            # answer channel empty. "Reasoning: low" keeps the analysis short enough
++            # that the final channel is reached. Same workaround the QAFD runner in
++            # this repo applies for the same model.
++            messages = _reasoning_low(messages)
+         params["messages"] = messages
+         logger.debug(f"Calling OpenAI GPT API with:\n{params}")
+ 
+@@ -183,7 +202,24 @@ class CacheOpenAI(BaseLLM):
+ 
+         response = self.openai_client.chat.completions.create(**params)
+ 
+-        response_message = response.choices[0].message.content
++        _msg = response.choices[0].message
++        response_message = _msg.content
++        if not isinstance(response_message, str):
++            # gpt-oss speaks the harmony format: chain-of-thought goes to
++            # reasoning_content and the answer to content. When the analysis channel
++            # eats the token budget the final channel never arrives and content comes
++            # back None -- which trips the assert below, retries three times, and ends
++            # as a RetryError that ner() swallows into an EMPTY entity list. The chunk
++            # is then silently absent from the graph: not a crash, a quietly worse KG.
++            # Salvage the reasoning text, which usually still contains the JSON.
++            salvaged = getattr(_msg, "reasoning_content", None)
++            if isinstance(salvaged, str) and salvaged:
++                logger.warning(
++                    "empty content from %s (finish_reason=%s); falling back to "
++                    "reasoning_content. Prepend 'Reasoning: low' to the system prompt "
++                    "to stop the analysis channel consuming the budget.",
++                    params.get("model"), response.choices[0].finish_reason)
++                response_message = salvaged
+         assert isinstance(response_message, str), "response_message should be a string"
+         
+         metadata = {
 diff --git a/src/hipporag/utils/config_utils.py b/src/hipporag/utils/config_utils.py
 index 6f4628a..388212e 100644
 --- a/src/hipporag/utils/config_utils.py
