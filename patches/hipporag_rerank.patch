@@ -353,10 +353,10 @@ index ce1a155..97a75d7 100644
              rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
              
 diff --git a/src/hipporag/information_extraction/openie_openai.py b/src/hipporag/information_extraction/openie_openai.py
-index 8490b3b..726e656 100644
+index 8490b3b..47b64d0 100644
 --- a/src/hipporag/information_extraction/openie_openai.py
 +++ b/src/hipporag/information_extraction/openie_openai.py
-@@ -3,6 +3,17 @@ import re
+@@ -3,6 +3,20 @@ import re
  from dataclasses import dataclass
  from typing import Dict, Any, List, TypedDict, Tuple
  from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -370,11 +370,14 @@ index 8490b3b..726e656 100644
 +    than a safety limit: a server that could serve 256 concurrent
 +    sequences still only ever sees 32.
 +    """
-+    return getattr(self.global_config, 'openie_max_workers', None) or None
++    # OpenIE.__init__ keeps only prompt_template_manager and llm_model, so the config
++    # hangs off the LLM client rather than off self.
++    cfg = getattr(getattr(self, "llm_model", None), "global_config", None)
++    return getattr(cfg, "openie_max_workers", None) or None
  from tqdm import tqdm
  
  from ..prompts import PromptTemplateManager
-@@ -154,7 +165,7 @@ class OpenIE:
+@@ -154,7 +168,7 @@ class OpenIE:
          total_completion_tokens = 0
          num_cache_hit = 0
  
@@ -383,7 +386,7 @@ index 8490b3b..726e656 100644
              # Create NER futures for each chunk
              ner_futures = {
                  executor.submit(self.ner, chunk_key, passage): chunk_key
-@@ -180,7 +191,7 @@ class OpenIE:
+@@ -180,7 +194,7 @@ class OpenIE:
  
          triple_results_list = []
          total_prompt_tokens, total_completion_tokens, num_cache_hit = 0, 0, 0
