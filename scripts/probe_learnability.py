@@ -104,15 +104,80 @@ def _adam(params, grads, state, lr):
         p -= lr * (m / (1 - 0.9 ** t)) / (np.sqrt(v / (1 - 0.999 ** t)) + 1e-8)
 
 
-def _logistic_loss_grad(s, y):
-    """Mean BCE-with-logits and dL/ds."""
+# Objective, set once per process before training. A module global rather than a
+# parameter because the three models call the gradient helper directly and the
+# workers inherit this by fork.
+_OBJ = {"loss": "pointwise", "starts": None}
+
+
+def _group_starts(qi):
+    """Boundaries of contiguous per-question row blocks.
+
+    Rows are built one question at a time and the validation split removes whole
+    questions, so each question's rows stay contiguous and a single boundary
+    array describes them.
+    """
+    if len(qi) == 0:
+        return np.array([0], dtype=np.int64)
+    cuts = np.flatnonzero(np.diff(qi) != 0) + 1
+    return np.concatenate([[0], cuts, [len(qi)]]).astype(np.int64)
+
+
+def _listwise_grad(s, y, starts):
+    """Per-question softmax cross-entropy, and dL/ds.
+
+    Pointwise BCE spends the same gradient on every row whatever its rank, which
+    is why it lifts AUC -- a global-order statistic over ~2000 candidates -- while
+    leaving the top of each question's list untouched. A per-question softmax puts
+    the gradient on whichever negatives currently outscore the positives, i.e. on
+    exactly the rows that decide recall@k, and it does so WITHOUT changing the
+    negative distribution -- which the pool comment below explains has to stay
+    identical in training and evaluation or the model inverts.
+    """
+    ds = np.zeros_like(s)
+    for a, b in zip(starts[:-1], starts[1:]):
+        yg = y[a:b]
+        tot = yg.sum()
+        if tot <= 0:
+            continue
+        e = np.exp(s[a:b] - s[a:b].max())
+        ds[a:b] = e / e.sum() - yg / tot
+    return 0.0, ds / max(len(starts) - 1, 1)
+
+
+def _recall_at_k(scores, y, starts, k=10):
+    """Mean per-question recall@k -- the statistic the pipeline actually spends."""
+    tot, n = 0.0, 0
+    for a, b in zip(starts[:-1], starts[1:]):
+        yg = y[a:b]
+        g = yg.sum()
+        if g <= 0:
+            continue
+        top = np.argsort(-scores[a:b])[:k]
+        tot += yg[top].sum() / g
+        n += 1
+    return tot / max(n, 1)
+
+
+def _loss_grad(s, y):
+    """Mean BCE-with-logits and dL/ds, or the listwise objective when selected."""
+    if _OBJ["loss"] == "listwise" and _OBJ["starts"] is not None:
+        return _listwise_grad(s, y, _OBJ["starts"])
     p = 1.0 / (1.0 + np.exp(-np.clip(s, -30, 30)))
     loss = -np.mean(y * np.log(p + 1e-12) + (1 - y) * np.log(1 - p + 1e-12))
     return loss, (p - y) / len(y)
 
 
-def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5):
-    """Train, keeping the parameters with the best validation AUC.
+def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5,
+                   select="auc", qi=None, loss="pointwise"):
+    """Train, keeping the parameters that scored best on the SELECTION metric.
+
+    select="auc" checkpoints on validation ROC-AUC, which ranks all ~2000
+    candidates and is therefore dominated by the easy tail. select="recall"
+    checkpoints on mean per-question recall@10 instead. The distinction is not
+    academic: on NV-Embed features the models gained +0.057 AUC while losing
+    recall@10, i.e. the run selected checkpoints for the metric nothing in the
+    pipeline spends.
 
     This is what stops the probe from confusing "no signal" with "the optimiser
     wandered off". Every learned model here starts at or near cosine, so without
@@ -130,17 +195,25 @@ def fit_early_stop(model, he, hq, y, deg, val, epochs=200, lr=0.01, eval_every=5
     ptr = model.prep(he[tr], hq[tr], deg[tr])
     pva = model.prep(he[val], hq[val], deg[val])
     ytr, yva = y[tr], y[val]
+    tr_starts = _group_starts(qi[tr]) if qi is not None else None
+    va_starts = _group_starts(qi[val]) if qi is not None else None
+    if loss == "listwise" and tr_starts is None:
+        raise ValueError("listwise needs per-question row groups (qi)")
+    _OBJ["loss"], _OBJ["starts"] = loss, tr_starts
     st = {}
     best = (-np.inf, [p.copy() for p in model._params()])
     for ep in range(1, epochs + 1):
         model._step(ptr, ytr, st, lr)
         if ep % eval_every == 0 or ep == epochs:
-            auc = roc_auc(model.score_prepped(pva), yva)
-            if auc > best[0]:
-                best = (auc, [p.copy() for p in model._params()])
+            sv = model.score_prepped(pva)
+            score = (roc_auc(sv, yva) if select == "auc"
+                     else _recall_at_k(sv, yva, va_starts, k=10))
+            if score > best[0]:
+                best = (score, [p.copy() for p in model._params()])
     for p, b in zip(model._params(), best[1]):
         p[...] = b
-    model.val_auc = best[0]
+    model.val_auc = best[0]      # the SELECTION score; see `select`
+    model.val_metric = select
     return model
 
 
@@ -189,7 +262,7 @@ class Diagonal:
         return he * hq          # the only thing the gradient needs
 
     def _step(self, P, y, st, lr):
-        _, ds = _logistic_loss_grad(P @ self.w + self.b, y)
+        _, ds = _loss_grad(P @ self.w + self.b, y)
         _adam(self._params(), [P.T @ ds, np.array([ds.sum()])], st, lr)
 
     def score_prepped(self, P):
@@ -227,7 +300,7 @@ class LowRank:
     def _step(self, P, y, st, lr):
         he, hq, cos = P
         ea, qb = he @ self.A, hq @ self.B
-        _, ds = _logistic_loss_grad(cos + np.sum(ea * qb, axis=1) + self.b, y)
+        _, ds = _loss_grad(cos + np.sum(ea * qb, axis=1) + self.b, y)
         _adam(self._params(),
               [he.T @ (ds[:, None] * qb), hq.T @ (ds[:, None] * ea),
                np.array([ds.sum()])], st, lr)
@@ -271,7 +344,7 @@ class MLP:
 
     def _step(self, X, y, st, lr):
         h = np.maximum(0, X @ self.W1 + self.b1)
-        _, ds = _logistic_loss_grad((h @ self.W2 + self.b2).ravel(), y)
+        _, ds = _loss_grad((h @ self.W2 + self.b2).ravel(), y)
         dh = (ds[:, None] @ self.W2.T) * (h > 0)
         _adam(self._params(),
               [X.T @ dh, dh.sum(0), h.T @ ds[:, None], np.array([ds.sum()])], st, lr)
@@ -296,7 +369,9 @@ _SHARED = {}
 def _train_one(model):
     """Fit one model in a worker. Only the parameters travel back."""
     return fit_early_stop(model, _SHARED["He"], _SHARED["Hq"], _SHARED["Y"],
-                          _SHARED["Dg"], _SHARED["val"], lr=_SHARED["lr"])
+                          _SHARED["Dg"], _SHARED["val"], lr=_SHARED["lr"],
+                          select=_SHARED.get("select", "auc"),
+                          qi=_SHARED.get("Qi"), loss=_SHARED.get("loss", "pointwise"))
 
 
 def build_pool(positives):
@@ -406,6 +481,21 @@ def main():
                     help="npz from --cache_query_emb; required when --nodes came "
                          "from an index built with something other than mpnet")
     ap.add_argument("--query_emb_kind", default="passage", choices=["passage", "fact"])
+    # The three knobs that decide WHICH ranking the training targets. Defaults
+    # reproduce every run so far; none of them changes the evaluation, so results
+    # stay comparable across settings.
+    ap.add_argument("--loss", default="pointwise", choices=["pointwise", "listwise"],
+                    help="pointwise BCE weights every row equally and optimises a "
+                         "global order; listwise is a per-question softmax and puts "
+                         "the gradient on negatives that currently outrank positives")
+    ap.add_argument("--select", default="auc", choices=["auc", "recall"],
+                    help="early-stopping metric: validation ROC-AUC, or mean "
+                         "per-question recall@10")
+    # entity_degree is a popularity feature, and the shuffle control shows
+    # popularity is precisely the signal that survives permuting the labels. Zeroing
+    # it asks whether the learned AUC gain was that nuisance all along.
+    ap.add_argument("--no-degree", action="store_true",
+                    help="zero the degree feature (MLP is the only model using it)")
     args = ap.parse_args()
 
     npz_path = args.nodes or OUT / f"qafd_nodes_{args.dataset}.npz"
@@ -419,6 +509,9 @@ def main():
     ent_emb = np.asarray(z["entity_emb"], dtype=np.float32)
     ent_emb /= np.linalg.norm(ent_emb, axis=1, keepdims=True) + 1e-12
     ent_deg = z["entity_degree"].astype(np.float32)
+    if args.no_degree:
+        ent_deg = np.zeros_like(ent_deg)
+        print("degree feature zeroed (--no-degree)")
     n_ent, d = ent_emb.shape
 
     # entity -> gold pids, as sets keyed by pid for a cheap per-question lookup
@@ -531,7 +624,8 @@ def main():
     print(f"training rows: {len(Y)} ({int(Y.sum())} positive), "
           f"{val.sum()} held out for early stopping ({len(val_q)} questions)")
 
-    _SHARED.update(He=He, Hq=Hq, Y=Y, Dg=Dg, val=val, lr=args.lr)
+    _SHARED.update(He=He, Hq=Hq, Y=Y, Dg=Dg, val=val, lr=args.lr, Qi=Qi,
+                   select=args.select, loss=args.loss)
     todo = [Diagonal(d, seed=args.seed),
             LowRank(d, r=args.rank, seed=args.seed),
             MLP(d, seed=args.seed)]
@@ -556,7 +650,8 @@ def main():
     freq_of[pool[0]] = pool[1]
     models = [Cosine(), Frequency(freq_of)] + trained
     for m in trained:
-        print(f"  {m.name:<10} best val AUC {m.val_auc:.4f}")
+        print(f"  {m.name:<10} best val "
+              f"{'AUC' if m.val_metric == 'auc' else 'recall@10'} {m.val_auc:.4f}")
     print(f"  trained in {time.time() - t0:.0f}s "
           f"({'parallel, %d workers' % min(args.jobs, len(todo)) if args.jobs > 1 else 'sequential'}, "
           f"{os.environ.get('OMP_NUM_THREADS', 'default')} BLAS threads each)")
