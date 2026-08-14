@@ -50,8 +50,29 @@ echo "==> sanity"
 # reapplying it to the submodule working tree, so a fixed marker passes on a stale
 # tree and the run then dies on argparse tens of minutes in. Ask the entry point
 # what it actually accepts, exactly as run_qafd_probe.sh does.
-_help=$( cd "$SUB" && python3 main.py --help 2>&1 ) || {
-    echo "    FATAL: main.py --help failed:" >&2; echo "$_help" | tail -5 >&2; exit 1; }
+#
+# This needs HippoRAG's dependencies, which live in the submodule this script just
+# cloned -- so on a first run the env does not exist yet. That is not a patch
+# problem and must not be reported as one: the patch is already applied above, and
+# rerunning after `uv pip install` is all that is needed.
+if _help=$( cd "$SUB" && python3 main.py --help 2>&1 ); then
+    :
+elif printf '%s' "$_help" | grep -q "ModuleNotFoundError\|ImportError"; then
+    cat <<EOF
+    patch applied, but the sanity check needs HippoRAG's dependencies:
+      $(printf '%s' "$_help" | grep -m1 "ModuleNotFoundError\|ImportError")
+
+    Create the env and rerun this script (the patch step above is idempotent):
+      uv venv --python 3.10 $ROOT/.venv-hippo
+      . $ROOT/.venv-hippo/bin/activate
+      uv pip install -r $SUB/requirements.txt
+      bash scripts/setup_hipporag.sh
+EOF
+    exit 2
+else
+    echo "    FATAL: main.py --help failed:" >&2; printf '%s\n' "$_help" | tail -5 >&2
+    exit 1
+fi
 for flag in --skip_qa --data_dir --dump --rerank_mode --rerank_candidate_k \
             --rerank_keep_k --export_facts --num_queries --query_shard; do
     case "$_help" in
@@ -104,10 +125,14 @@ cat <<'EOF'
 
 ==> next, by hand
 
-  Env (3.10, matching their README's conda pin):
+  Everything below runs from the repo root, not from $HOME.
+
+  Env (3.10, matching their README's conda pin). Note the ORDER: this script
+  clones the submodule, so requirements.txt does not exist until it has run once.
     uv venv --python 3.10 .venv-hippo
     . .venv-hippo/bin/activate
     uv pip install -r third_party/HippoRAG/requirements.txt
+    bash scripts/setup_hipporag.sh          # again, to pass the sanity check
 
   Data — ours, which is already theirs: scripts/download_data.py pulls
   data/<ds>.json and data/<ds>_corpus.json from osunlp/HippoRAG_v2, the authors' own
