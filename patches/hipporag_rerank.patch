@@ -385,6 +385,59 @@ index ce1a155..97a75d7 100644
              
              rerank_log = {'facts_before_rerank': candidate_facts, 'facts_after_rerank': top_k_facts}
              
+diff --git a/src/hipporag/embedding_model/__init__.py b/src/hipporag/embedding_model/__init__.py
+index 86574e4..e7cbb59 100644
+--- a/src/hipporag/embedding_model/__init__.py
++++ b/src/hipporag/embedding_model/__init__.py
+@@ -1,11 +1,14 @@
+-from .Contriever import ContrieverModel
++# Only `base` is imported eagerly -- HippoRAG.py and StandardRAG.py need
++# BaseEmbeddingModel at module scope. Every backend is imported inside
++# _get_embedding_model_class instead, one at a time.
++#
++# Importing them all up front means any single backend's dependencies can take the
++# whole package down for users who never touch it. Concretely: Colab ships
++# sentence-transformers 5.x, whose module-scope `torchcodec` import fails against
++# torch 2.5.1, and that made HippoRAG unimportable for an NV-Embed-v2 run that has
++# no use for sentence-transformers at all. Same for gritlm, cohere and vllm, each of
++# which is a heavy dependency for one backend.
+ from .base import EmbeddingConfig, BaseEmbeddingModel
+-from .GritLM import GritLMEmbeddingModel
+-from .NVEmbedV2 import NVEmbedV2EmbeddingModel
+-from .OpenAI import OpenAIEmbeddingModel
+-from .Cohere import CohereEmbeddingModel
+-from .Transformers import TransformersEmbeddingModel
+-from .VLLM import VLLMEmbeddingModel
+ 
+ from ..utils.logging_utils import get_logger
+ 
+@@ -13,18 +16,26 @@ logger = get_logger(__name__)
+ 
+ 
+ def _get_embedding_model_class(embedding_model_name: str = "nvidia/NV-Embed-v2"):
++    """The backend for a model name, imported only when it is the one selected."""
+     if "GritLM" in embedding_model_name:
++        from .GritLM import GritLMEmbeddingModel
+         return GritLMEmbeddingModel
+     elif "NV-Embed-v2" in embedding_model_name:
++        from .NVEmbedV2 import NVEmbedV2EmbeddingModel
+         return NVEmbedV2EmbeddingModel
+     elif "contriever" in embedding_model_name:
++        from .Contriever import ContrieverModel
+         return ContrieverModel
+     elif "text-embedding" in embedding_model_name:
++        from .OpenAI import OpenAIEmbeddingModel
+         return OpenAIEmbeddingModel
+     elif "cohere" in embedding_model_name:
++        from .Cohere import CohereEmbeddingModel
+         return CohereEmbeddingModel
+     elif embedding_model_name.startswith("Transformers/"):
++        from .Transformers import TransformersEmbeddingModel
+         return TransformersEmbeddingModel
+     elif embedding_model_name.startswith("VLLM/"):
++        from .VLLM import VLLMEmbeddingModel
+         return VLLMEmbeddingModel
+     raise ValueError(f"Unknown embedding model name: {embedding_model_name}")
 diff --git a/src/hipporag/information_extraction/openie_openai.py b/src/hipporag/information_extraction/openie_openai.py
 index 8490b3b..47b64d0 100644
 --- a/src/hipporag/information_extraction/openie_openai.py
