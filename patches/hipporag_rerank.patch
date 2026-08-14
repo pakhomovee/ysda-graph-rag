@@ -1,8 +1,8 @@
 diff --git a/main.py b/main.py
-index 9e20be7..2a13251 100644
+index 9e20be7..7747f94 100644
 --- a/main.py
 +++ b/main.py
-@@ -62,23 +62,192 @@ def parse_args():
+@@ -62,23 +62,199 @@ def parse_args():
      parser.add_argument("--embedding_name", default="nvidia/NV-Embed-v2", help="Embedding model name")
      parser.add_argument("--azure_endpoint", help="Azure OpenAI chat completions endpoint")
      parser.add_argument("--azure_embedding_endpoint", help="Azure OpenAI embeddings endpoint")
@@ -58,6 +58,13 @@ index 9e20be7..2a13251 100644
 +    parser.add_argument("--export_facts", default=None,
 +                        help="write the (query, candidate facts, labels) npz for "
 +                             "training a reranker, then exit before retrieval")
++    parser.add_argument("--embedding_max_seq_len", type=int, default=0,
++                        help="token cap for the encoder. BaseConfig's 2048 sizes the "
++                             "attention activations for EVERY batch, but the ~230k "
++                             "entity and fact strings are a handful of tokens each and "
++                             "the 11.7k passages are ~150. Capping it lets one batch "
++                             "size serve both workloads instead of the long texts "
++                             "dictating a small batch for everything. 0 keeps 2048")
 +    parser.add_argument("--openie_max_workers", type=int, default=0,
 +                        help="OpenIE client concurrency. 0 keeps ThreadPoolExecutor's "
 +                             "min(32, cpu+4), which is a throughput ceiling: the "
@@ -199,7 +206,7 @@ index 9e20be7..2a13251 100644
      queries = [sample["question"] for sample in samples]
      gold_answers = get_gold_answers(samples)
      try:
-@@ -87,6 +256,20 @@ def main():
+@@ -87,6 +263,20 @@ def main():
          logging.warning("Retrieval evaluation is disabled because supporting documents are unavailable")
          gold_docs = None
  
@@ -220,10 +227,11 @@ index 9e20be7..2a13251 100644
      config = BaseConfig(
          save_dir=save_dir,
          llm_base_url=args.llm_base_url,
-@@ -103,12 +286,65 @@ def main():
+@@ -103,12 +293,66 @@ def main():
          qa_top_k=5,
          embedding_batch_size=args.embedding_batch_size,
          openie_mode=args.openie_mode,
++        embedding_max_seq_len=args.embedding_max_seq_len or 2048,
 +        openie_max_workers=args.openie_max_workers or None,
 +        rerank_candidate_k=args.rerank_candidate_k or None,
 +        rerank_keep_k=args.rerank_keep_k or None,
