@@ -396,13 +396,36 @@ index 8490b3b..47b64d0 100644
              re_futures = {
                  executor.submit(self.triple_extraction, ner_result.chunk_id,
 diff --git a/src/hipporag/llm/openai_gpt.py b/src/hipporag/llm/openai_gpt.py
-index f4ae0ba..1a28929 100644
+index f4ae0ba..4abb404 100644
 --- a/src/hipporag/llm/openai_gpt.py
 +++ b/src/hipporag/llm/openai_gpt.py
-@@ -110,6 +110,18 @@ def dynamic_retry_decorator(func):
+@@ -110,6 +110,41 @@ def dynamic_retry_decorator(func):
          return decorated_func(self, *args, **kwargs)
      return wrapper
  
++def _salvage_reasoning(msg):
++    """The reasoning text a harmony-format model put somewhere other than `content`.
++
++    The field name varies by server build: vLLM's gpt-oss returns `reasoning`, other
++    OpenAI-compatible servers use `reasoning_content`, and pydantic parks fields it
++    does not model in `model_extra`. Checking only one name silently disables the
++    salvage -- which is what turned every call into three retries plus backoff and
++    stalled indexing at ~0.4 calls/sec against a server answering in half a second.
++
++    Returns (text, which_field) or (None, None).
++    """
++    for attr in ("reasoning_content", "reasoning"):
++        v = getattr(msg, attr, None)
++        if isinstance(v, str) and v.strip():
++            return v, attr
++    extra = getattr(msg, "model_extra", None) or {}
++    for attr in ("reasoning_content", "reasoning"):
++        v = extra.get(attr)
++        if isinstance(v, str) and v.strip():
++            return v, f"model_extra[{attr}]"
++    return None, None
++
++
 +def _reasoning_low(messages):
 +    """Prepend a low-reasoning directive to the system turn, copying rather than
 +    mutating: `messages` is built once per chunk and reused by the retry decorator."""
@@ -418,7 +441,7 @@ index f4ae0ba..1a28929 100644
  class CacheOpenAI(BaseLLM):
      """OpenAI LLM implementation."""
      @classmethod
-@@ -174,6 +186,13 @@ class CacheOpenAI(BaseLLM):
+@@ -174,6 +209,13 @@ class CacheOpenAI(BaseLLM):
          params = deepcopy(self.llm_config.generate_params)
          if kwargs:
              params.update(kwargs)
@@ -432,7 +455,7 @@ index f4ae0ba..1a28929 100644
          params["messages"] = messages
          logger.debug(f"Calling OpenAI GPT API with:\n{params}")
  
-@@ -183,7 +202,24 @@ class CacheOpenAI(BaseLLM):
+@@ -183,7 +225,25 @@ class CacheOpenAI(BaseLLM):
  
          response = self.openai_client.chat.completions.create(**params)
  
@@ -447,13 +470,14 @@ index f4ae0ba..1a28929 100644
 +            # as a RetryError that ner() swallows into an EMPTY entity list. The chunk
 +            # is then silently absent from the graph: not a crash, a quietly worse KG.
 +            # Salvage the reasoning text, which usually still contains the JSON.
-+            salvaged = getattr(_msg, "reasoning_content", None)
++            salvaged, _used = _salvage_reasoning(_msg)
 +            if isinstance(salvaged, str) and salvaged:
 +                logger.warning(
-+                    "empty content from %s (finish_reason=%s); falling back to "
-+                    "reasoning_content. Prepend 'Reasoning: low' to the system prompt "
-+                    "to stop the analysis channel consuming the budget.",
-+                    params.get("model"), response.choices[0].finish_reason)
++                    "empty content from %s (finish_reason=%s); salvaged %d chars from "
++                    "%s. If this is frequent, raise max_completion_tokens -- the "
++                    "reasoning channel is consuming the whole budget.",
++                    params.get("model"), response.choices[0].finish_reason,
++                    len(salvaged), _used)
 +                response_message = salvaged
          assert isinstance(response_message, str), "response_message should be a string"
          
